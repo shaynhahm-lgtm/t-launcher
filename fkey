@@ -1,0 +1,487 @@
+#!/data/data/com.termux/files/usr/bin/env bash
+# fkey — what is this file, and how do I use it?
+# Companion to pkgkey. fkey tells you the tools; pkgkey shows their commands.
+
+if [ -t 1 ]; then
+  B=$'\e[1m'; DIM=$'\e[2m'; AMBER=$'\e[33m'; GRN=$'\e[32m'
+  CYN=$'\e[36m'; RED=$'\e[31m'; RS=$'\e[0m'
+else
+  B=""; DIM=""; AMBER=""; GRN=""; CYN=""; RED=""; RS=""
+fi
+
+die(){ printf '%s\n' "$*" >&2; exit 1; }
+
+# Strip path/dot, handle compound extensions like tar.gz
+get_ext(){
+  local input="${1#.}"
+  local base="${input##*/}"
+  # compound extensions
+  case "${base,,}" in
+    *.tar.gz|*.tar.xz|*.tar.bz2|*.tar.zst)
+      printf '%s' "${base#*.}" | tr '[:upper:]' '[:lower:]'; return ;;
+  esac
+  printf '%s' "${base##*.}" | tr '[:upper:]' '[:lower:]'
+}
+
+# Cross-reference: suggest pkgkey if it's installed
+pkgref(){
+  command -v pkgkey >/dev/null 2>&1 \
+    && printf '  %s→ pkgkey %s  (explore its commands)%s\n' "$DIM" "$1" "$RS"
+}
+
+# Install hint — warns if a package isn't present
+need(){
+  local pkg="$1"
+  if ! dpkg -l "$pkg" >/dev/null 2>&1; then
+    printf '  %s⚠  not installed → pkg install %s%s\n' "$AMBER" "$pkg" "$RS"
+  fi
+}
+
+hdr(){ printf '\n%s.%s%s  —  %s\n%s%s%s\n' "$B$AMBER" "$1" "$RS" "$2" "$DIM" "$(printf '%.0s─' {1..44})" "$RS"; }
+sec(){ printf '\n%s%s%s\n' "$CYN" "$1" "$RS"; }
+cmd(){ printf '  %-28s%s%s%s\n' "$1" "$DIM" "$2" "$RS"; }
+tip(){ printf '\n%s💡 %s%s\n' "$DIM" "$1" "$RS"; }
+
+lookup(){
+  local ext="$1"
+  case "$ext" in
+
+  # ── ARCHIVES ─────────────────────────────────────────
+  tar)
+    hdr tar "Uncompressed tape archive"
+    sec "How to use"
+    cmd "tar -tf file.tar"        "list contents"
+    cmd "tar -xf file.tar"        "extract here"
+    cmd "tar -xf file.tar -C dir" "extract to a folder"
+    cmd "tar -cf out.tar files/"  "create"
+    ;;
+  gz|tar.gz|tgz)
+    hdr gz "Gzip compressed (usually a .tar.gz tarball)"
+    sec "How to use"
+    cmd "tar -xzf file.tar.gz"   "extract tarball"
+    cmd "tar -tzf file.tar.gz"   "list contents"
+    cmd "gunzip file.gz"          "decompress single file"
+    cmd "gzip file"               "compress a file"
+    ;;
+  xz|tar.xz|txz)
+    hdr xz "XZ compressed archive — high compression, slow"
+    sec "How to use"
+    cmd "tar -xf file.tar.xz"    "extract (tar handles xz itself)"
+    cmd "tar -tf file.tar.xz"    "list contents"
+    cmd "xz -d file.xz"          "decompress single file"
+    need xz-utils; pkgref xz-utils
+    ;;
+  bz2|tar.bz2)
+    hdr bz2 "Bzip2 compressed archive"
+    sec "How to use"
+    cmd "tar -xjf file.tar.bz2"  "extract tarball"
+    cmd "bunzip2 file.bz2"        "decompress single file"
+    ;;
+  zip)
+    hdr zip "ZIP archive — cross-platform, per-file compression"
+    sec "How to use"
+    cmd "unzip -l file.zip"       "list contents"
+    cmd "unzip file.zip"          "extract here"
+    cmd "unzip file.zip -d dir/"  "extract to folder"
+    cmd "zip -r out.zip folder/"  "create"
+    need zip; pkgref zip
+    ;;
+  7z)
+    hdr 7z "7-Zip archive — best compression ratio"
+    sec "How to use"
+    cmd "7z l file.7z"            "list contents"
+    cmd "7z x file.7z"            "extract"
+    cmd "7z a out.7z files/"      "create"
+    need p7zip; pkgref p7zip
+    ;;
+  rar)
+    hdr rar "RAR archive"
+    sec "How to use"
+    cmd "unrar l file.rar"        "list contents"
+    cmd "unrar x file.rar"        "extract"
+    need unrar; pkgref unrar
+    ;;
+
+  # ── PACKAGES ─────────────────────────────────────────
+  deb)
+    hdr deb "Debian/Termux software package"
+    sec "What it is"
+    printf '  A software bundle — binaries, configs, install scripts.\n'
+    printf '  Used by apt/dpkg on Termux, Debian, and Ubuntu.\n'
+    sec "How to use"
+    cmd "apt install ./file.deb"  "install (resolves dependencies)"
+    cmd "dpkg -I file.deb"        "show package info & version"
+    cmd "dpkg -c file.deb"        "list all files inside"
+    cmd "dpkg -x file.deb ./out/" "extract files without installing"
+    cmd "dpkg -e file.deb ./ctrl" "extract install scripts only"
+    tip "Prefer apt install ./ over dpkg -i — apt handles missing deps."
+    pkgref dpkg
+    ;;
+  apk)
+    hdr apk "Android Package — app installer"
+    sec "What it is"
+    printf '  An APK is a ZIP file: code (.dex), resources, AndroidManifest.xml.\n'
+    printf '  You can crack one open without installing it.\n'
+    sec "Install"
+    cmd "adb install file.apk"    "install via USB/ADB"
+    sec "Inspect (static analysis)"
+    cmd "unzip -l file.apk"                        "see what's inside"
+    cmd "apktool d file.apk -o decoded/"           "decode to readable files"
+    cmd "jadx -d out/ file.apk"                    "decompile back to Java"
+    cmd "strings file.apk | grep -i 'http\|key'"  "hunt for hardcoded URLs/tokens"
+    cmd "cat decoded/AndroidManifest.xml"          "check permissions"
+    sec "Red flags in the manifest"
+    printf '  %sSEND_SMS RECORD_AUDIO ACCESS_FINE_LOCATION BIND_DEVICE_ADMIN%s\n' "$RED" "$RS"
+    printf '  %sin an app with no reason to use them = suspicious%s\n' "$DIM" "$RS"
+    tip "pkgkey apktool  to see apktool commands after installing it."
+    ;;
+  jar)
+    hdr jar "Java Archive"
+    sec "What it is"
+    printf '  A ZIP of compiled Java .class files.\n'
+    sec "How to use"
+    cmd "java -jar file.jar"      "run it"
+    cmd "unzip -l file.jar"       "list contents"
+    cmd "jadx -d out/ file.jar"   "decompile to readable Java"
+    need openjdk-21; pkgref openjdk-21
+    ;;
+
+  # ── WEB ──────────────────────────────────────────────
+  html|htm)
+    hdr html "HyperText Markup Language — web page structure"
+    sec "What it is"
+    printf '  The skeleton of every web page. Browsers render it visually.\n'
+    sec "How to use"
+    cmd "termux-open file.html"         "open in phone browser"
+    cmd "python -m http.server 8080"    "serve locally (then visit localhost:8080)"
+    cmd "nano file.html"                "view/edit raw"
+    cmd "tidy -errors -quiet file.html" "validate"
+    tip ".html + .css + .js together = a complete web app."
+    ;;
+  css)
+    hdr css "Cascading Style Sheets — controls appearance of HTML"
+    sec "How to use"
+    cmd "nano style.css"                        "edit"
+    cmd '<link rel="stylesheet" href="file.css">' "link from HTML"
+    ;;
+  js)
+    hdr js "JavaScript — scripting for web and Node.js"
+    sec "How to use"
+    cmd "node file.js"              "run with Node"
+    cmd '<script src="file.js"></script>' "load in browser"
+    need nodejs; pkgref nodejs
+    ;;
+  json)
+    hdr json "JSON — universal data/config format"
+    sec "How to use"
+    cmd "cat file.json | python -m json.tool" "pretty-print"
+    cmd "cat file.json | jq .fieldname"       "query a field"
+    cmd "jq 'keys' file.json"                 "list top-level keys"
+    need jq; pkgref jq
+    ;;
+  xml)
+    hdr xml "XML — structured data, used in Android manifests & configs"
+    sec "How to use"
+    cmd "xmllint --format file.xml"          "pretty-print"
+    cmd "xmllint --noout file.xml"           "validate (errors only)"
+    cmd "xmllint --xpath '//tag' file.xml"   "query"
+    need libxml2-utils
+    ;;
+  yaml|yml)
+    hdr yaml "YAML — human-readable config (Docker, CI, Kubernetes)"
+    sec "How to use"
+    cmd "nano file.yaml"   "edit"
+    cmd "python -c \"import yaml; yaml.safe_load(open('f.yaml'))\"" "validate"
+    cmd "yq .fieldname file.yaml" "query"
+    ;;
+  md)
+    hdr md "Markdown — plain text with simple formatting"
+    sec "How to use"
+    cmd "nano file.md"             "read/edit raw"
+    cmd "glow file.md"             "render in terminal"
+    cmd "pandoc file.md -o out.html" "convert to HTML"
+    need glow; pkgref glow
+    ;;
+
+  # ── SCRIPTS & CODE ───────────────────────────────────
+  sh|bash)
+    hdr sh "Shell script — automation for Termux and Linux"
+    sec "How to use"
+    cmd "bash file.sh"            "run with bash"
+    cmd "chmod +x file.sh && ./file.sh" "make executable and run"
+    cmd "bash -x file.sh"         "debug mode (shows each command)"
+    cmd "shellcheck file.sh"      "lint for common mistakes"
+    need shellcheck; pkgref shellcheck
+    ;;
+  py)
+    hdr py "Python script"
+    sec "How to use"
+    cmd "python file.py"          "run"
+    cmd "pip install -r requirements.txt" "install dependencies"
+    cmd "python -m venv env && source env/bin/activate" "isolated environment"
+    need python; pkgref python
+    ;;
+  java)
+    hdr java "Java source file"
+    sec "How to use"
+    cmd "javac File.java"         "compile → produces File.class"
+    cmd "java ClassName"          "run compiled class"
+    need openjdk-21; pkgref openjdk-21
+    ;;
+  c)
+    hdr c "C source file"
+    sec "How to use"
+    cmd "gcc file.c -o program"   "compile"
+    cmd "./program"               "run"
+    cmd "gcc -g file.c -o prog && gdb ./prog" "debug"
+    need clang; pkgref clang
+    ;;
+  cpp|cc)
+    hdr cpp "C++ source file"
+    sec "How to use"
+    cmd "g++ file.cpp -o program" "compile"
+    cmd "./program"               "run"
+    need clang
+    ;;
+  rs)
+    hdr rs "Rust source file"
+    sec "How to use"
+    cmd "rustc file.rs && ./file" "compile single file"
+    cmd "cargo build"             "build a project"
+    cmd "cargo run"               "build and run"
+    need rust; pkgref rust
+    ;;
+  go)
+    hdr go "Go source file"
+    sec "How to use"
+    cmd "go run file.go"          "run directly"
+    cmd "go build file.go"        "compile to binary"
+    need golang; pkgref golang
+    ;;
+
+  # ── DOCUMENTS ────────────────────────────────────────
+  pdf)
+    hdr pdf "PDF — Portable Document Format"
+    sec "How to use"
+    cmd "termux-open file.pdf"    "open in viewer"
+    cmd "pdftotext file.pdf -"    "extract all text"
+    cmd "pdfinfo file.pdf"        "page count, metadata"
+    cmd "pdfunite a.pdf b.pdf out.pdf" "merge PDFs"
+    need poppler; pkgref poppler
+    ;;
+  docx)
+    hdr docx "Microsoft Word document"
+    sec "What it is"
+    printf '  Actually a ZIP of XML files. You can unzip it and read the XML raw.\n'
+    sec "How to use"
+    cmd "unzip -l file.docx"      "peek at the structure"
+    cmd "unzip file.docx word/document.xml -d /tmp/ && cat /tmp/word/document.xml" "raw XML"
+    cmd "libreoffice --writer file.docx" "open properly (needs a desktop)"
+    ;;
+  xlsx)
+    hdr xlsx "Microsoft Excel spreadsheet"
+    sec "What it is"
+    printf '  A ZIP of XML files, same as docx.\n'
+    sec "How to use"
+    cmd "unzip -l file.xlsx"      "peek at structure"
+    cmd "python -c \"import pandas as pd; print(pd.read_excel('file.xlsx'))\"" "view in Python"
+    ;;
+  csv)
+    hdr csv "CSV — Comma-Separated Values"
+    sec "How to use"
+    cmd "column -t -s, file.csv | less" "aligned table view"
+    cmd "awk -F, '{print \$1,\$3}' file.csv" "print columns 1 and 3"
+    cmd "wc -l file.csv"          "row count"
+    ;;
+
+  # ── IMAGES ───────────────────────────────────────────
+  jpg|jpeg)
+    hdr jpg "JPEG image — lossy compression, great for photos"
+    sec "How to use"
+    cmd "termux-open file.jpg"    "view"
+    cmd "convert file.jpg -resize 50% out.jpg" "resize to half"
+    cmd "exiftool file.jpg"       "read/strip metadata (GPS etc.)"
+    need imagemagick; pkgref imagemagick
+    ;;
+  png)
+    hdr png "PNG image — lossless, great for screenshots"
+    sec "How to use"
+    cmd "termux-open file.png"    "view"
+    cmd "convert file.png file.jpg" "convert to JPEG"
+    cmd "optipng file.png"        "compress without quality loss"
+    need imagemagick
+    ;;
+  svg)
+    hdr svg "SVG — Scalable Vector Graphic (XML inside)"
+    sec "How to use"
+    cmd "cat file.svg"            "it's just XML — read it"
+    cmd "nano file.svg"           "edit it directly"
+    cmd "convert file.svg out.png" "rasterize to PNG"
+    need imagemagick
+    ;;
+  gif)
+    hdr gif "GIF — animated or static image"
+    sec "How to use"
+    cmd "termux-open file.gif"    "view"
+    cmd "convert file.gif frame%d.png" "extract frames"
+    need imagemagick
+    ;;
+
+  # ── VIDEO / AUDIO ─────────────────────────────────────
+  mp4|mkv|avi|mov|webm)
+    hdr "$ext" "Video file"
+    sec "How to use"
+    cmd "termux-open file.$ext"            "play on phone"
+    cmd "ffprobe file.$ext"                "inspect: codec, resolution, duration"
+    cmd "ffmpeg -i in.$ext out.mp4"        "convert format"
+    cmd "ffmpeg -i file.$ext -vn audio.mp3" "strip to audio only"
+    cmd "ffmpeg -i file.$ext -ss 0:01:00 -t 30 clip.mp4" "clip 30s starting at 1min"
+    need ffmpeg; pkgref ffmpeg
+    ;;
+  mp3|wav|flac|ogg|m4a|aac)
+    hdr "$ext" "Audio file"
+    sec "How to use"
+    cmd "termux-open file.$ext"         "play"
+    cmd "ffprobe file.$ext"             "inspect: bitrate, duration"
+    cmd "ffmpeg -i file.$ext out.mp3"   "convert to mp3"
+    need ffmpeg; pkgref ffmpeg
+    ;;
+
+  # ── BINARY / SYSTEM ──────────────────────────────────
+  so)
+    hdr so "Shared library — code loaded by other programs"
+    sec "What it is"
+    printf '  Not run directly. Provides functions that executables call.\n'
+    sec "How to use"
+    cmd "nm -D file.so | less"    "list exported symbols/functions"
+    cmd "strings file.so"         "readable strings inside"
+    cmd "ldd /path/to/binary"     "see which .so files it needs"
+    ;;
+  bin|img|iso)
+    hdr "$ext" "Binary / disk image"
+    sec "How to use"
+    cmd "file file.$ext"          "identify actual type"
+    cmd "xxd file.$ext | head -40" "raw hex dump — first 40 lines"
+    cmd "strings file.$ext"       "readable text inside"
+    cmd "7z x file.$ext"          "try to extract (works on many types)"
+    need xxd; need p7zip
+    ;;
+
+  # ── DATABASE ─────────────────────────────────────────
+  sqlite|db|sqlite3)
+    hdr sqlite "SQLite database — a full SQL DB in one file"
+    sec "What it is"
+    printf '  Used everywhere: Android apps, browsers, tools.\n'
+    printf '  Great for malware hunting — apps store logs and creds here.\n'
+    sec "How to use"
+    cmd "sqlite3 file.db"                    "open interactive shell"
+    cmd "sqlite3 file.db '.tables'"          "list all tables"
+    cmd "sqlite3 file.db 'SELECT * FROM t;'" "query a table"
+    cmd "sqlite3 file.db .dump > backup.sql" "export to SQL"
+    need sqlite; pkgref sqlite
+    ;;
+  sql)
+    hdr sql "SQL script"
+    sec "How to use"
+    cmd "sqlite3 database.db < file.sql" "run on SQLite"
+    cmd "nano file.sql"                  "view/edit"
+    ;;
+
+  # ── CONFIG ────────────────────────────────────────────
+  conf|cfg|ini|config)
+    hdr "$ext" "Configuration file"
+    sec "What it is"
+    printf '  Settings for a program. Almost always plain text.\n'
+    sec "How to use"
+    cmd "nano file.$ext"          "view and edit"
+    cmd "grep -v '^#' file.$ext"  "view without comments"
+    tip "Check the man page for the related program for valid options."
+    ;;
+  env)
+    hdr env "Environment variables file"
+    sec "What it is"
+    printf '  KEY=VALUE pairs — API keys, passwords, secrets.\n'
+    printf '  Loaded into the shell so apps can read them.\n'
+    sec "How to use"
+    cmd "source .env"             "load into current shell"
+    cmd "set -a; source .env; set +a" "export all to subprocesses too"
+    printf '\n  %s⚠  Never commit .env to git — it contains secrets.%s\n' "$RED" "$RS"
+    ;;
+
+  # ── CATCH-ALL ─────────────────────────────────────────
+  *)
+    printf '\n%sUnknown: .%s%s\n\n' "$AMBER" "$ext" "$RS"
+    printf 'General recon commands to figure it out:\n\n'
+    cmd "file yourfile.$ext"          "magic-byte detection (most reliable)"
+    cmd "xxd yourfile.$ext | head"    "raw hex — first bytes tell the type"
+    cmd "strings yourfile.$ext | head -30" "any readable text inside"
+    cmd "binwalk yourfile.$ext"       "scan for embedded files/filesystems"
+    printf '\nLook it up:\n'
+    printf '  %shttps://fileinfo.com/extension/%s%s\n\n' "$CYN" "$ext" "$RS"
+    return 1
+    ;;
+  esac
+
+  printf '\n%s──────────────────────────────────────────────%s\n' "$DIM" "$RS"
+  command -v pkgkey >/dev/null 2>&1 \
+    && printf '%spkgkey <package>  →  explore a tool'"'"'s commands%s\n' "$DIM" "$RS"
+}
+
+list_all(){
+  printf '%sAll known extensions%s\n\n' "$B$AMBER" "$RS"
+  local -A groups=(
+    [Archives]="tar gz xz bz2 zip 7z rar"
+    [Packages]="deb apk jar"
+    [Web]="html css js json xml yaml md"
+    [Scripts]="sh py java c cpp rs go"
+    [Documents]="pdf docx xlsx csv"
+    [Images]="jpg png svg gif"
+    [Video]="mp4 mkv avi mov webm"
+    [Audio]="mp3 wav flac ogg m4a"
+    [System]="so bin iso"
+    [Database]="sqlite sql"
+    [Config]="conf ini env"
+  )
+  local order=(Archives Packages Web Scripts Documents Images Video Audio System Database Config)
+  local g ext
+  for g in "${order[@]}"; do
+    printf '%s%-12s%s' "$CYN" "$g" "$RS"
+    for ext in ${groups[$g]}; do
+      printf '%s.%s%s ' "$GRN" "$ext" "$RS"
+    done
+    printf '\n'
+  done
+  printf '\n%sfkey <ext>  to look one up%s\n' "$DIM" "$RS"
+}
+
+usage(){
+  cat <<EOF
+${B}fkey${RS} — what is this file, and how do I use it?
+
+${AMBER}Usage${RS}
+  fkey <ext>          look up an extension
+  fkey <filename>     full filenames work too
+  fkey -l             list all known extensions
+  fkey -h             this help
+
+${AMBER}Examples${RS}
+  fkey apk            what is it + how to pull it apart
+  fkey report.pdf     how to open, extract, merge
+  fkey deb            how to install or inspect a package
+  fkey tar.gz         how to extract a tarball
+  fkey sqlite         how to read an Android app database
+
+${DIM}Pair with pkgkey:
+  fkey  tells you which tools to use
+  pkgkey <tool>  shows you that tool's commands${RS}
+EOF
+}
+
+case "$1" in
+  ""|-h|--help) usage ;;
+  -l|--list)    list_all ;;
+  *)
+    ext=$(get_ext "$1")
+    lookup "$ext"
+    ;;
+esac

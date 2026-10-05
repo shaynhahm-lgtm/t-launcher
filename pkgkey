@@ -1,0 +1,199 @@
+#!/data/data/com.termux/files/usr/bin/env bash
+# pkgkey — the key to your installed packages.
+# Lists the commands each installed package provides, and lets you use them.
+# Works on Termux and Debian/Ubuntu (any dpkg-based system).
+
+set -o pipefail
+
+if [ -t 1 ]; then
+  B=$'\e[1m'; DIM=$'\e[2m'; AMBER=$'\e[33m'; GRN=$'\e[32m'; CYN=$'\e[36m'; RS=$'\e[0m'
+else
+  B=""; DIM=""; AMBER=""; GRN=""; CYN=""; RS=""
+fi
+
+die(){ printf '%s\n' "$*" >&2; exit 1; }
+
+command -v dpkg-query >/dev/null 2>&1 || die "pkgkey needs dpkg (Termux / Debian / Ubuntu). Not found."
+
+BIN_DIRS=()
+[ -n "$PREFIX" ] && BIN_DIRS+=("$PREFIX/bin")
+BIN_DIRS+=("/usr/bin" "/bin" "/usr/sbin" "/sbin" "/usr/local/bin")
+
+is_bin_path(){
+  local p="$1" d
+  for d in "${BIN_DIRS[@]}"; do
+    case "$p" in "$d"/*) return 0;; esac
+  done
+  return 1
+}
+
+describe(){ whatis "$1" 2>/dev/null | head -1 | sed 's/^[^-]*- *//'; }
+
+cmds_of(){
+  local f
+  dpkg -L "$1" 2>/dev/null | sort -u | while IFS= read -r f; do
+    is_bin_path "$f" || continue
+    [ -f "$f" ] && [ -x "$f" ] || continue
+    printf '%s\n' "${f##*/}"
+  done
+}
+
+list_packages(){
+  dpkg-query -W -f='${binary:Package}\t${binary:Summary}\n' 2>/dev/null | sort \
+    | while IFS=$'\t' read -r name summ; do
+        printf '%s%-28s%s %s%s%s\n' "$GRN" "$name" "$RS" "$DIM" "$summ" "$RS"
+      done
+}
+
+search(){
+  [ -n "$1" ] || die "search needs a term:  pkgkey -s <term>"
+  dpkg-query -W -f='${binary:Package}\t${binary:Summary}\n' 2>/dev/null \
+    | grep -i -- "$1" \
+    | while IFS=$'\t' read -r name summ; do
+        printf '%s%-28s%s %s%s%s\n' "$GRN" "$name" "$RS" "$DIM" "$summ" "$RS"
+      done
+}
+
+# full usage for a command
+show_usage(){
+  local cmd="$1"
+  [ -n "$cmd" ] || die "usage of what?  pkgkey -u <command>"
+  if man -w "$cmd" >/dev/null 2>&1; then
+    man "$cmd"
+  else
+    printf '%sNo man page. Showing "%s --help":%s\n\n' "$DIM" "$cmd" "$RS"
+    "$cmd" --help 2>&1 | head -80 || printf 'No --help either.\n'
+  fi
+}
+
+# interactive: pick a numbered command and act on it
+interactive_use(){
+  local -n arr="$1"
+  local sel action cmd argv
+  while true; do
+    printf '\n%spick # to use it (Enter to quit):%s ' "$AMBER" "$RS"
+    read -r sel || break
+    [ -z "$sel" ] && break
+    case "$sel" in *[!0-9]*) printf '  %snumbers only%s\n' "$DIM" "$RS"; continue;; esac
+    if [ "$sel" -lt 1 ] || [ "$sel" -gt "${#arr[@]}" ]; then
+      printf '  %sout of range%s\n' "$DIM" "$RS"; continue
+    fi
+    cmd="${arr[$((sel-1))]}"
+    printf '%s%s%s  [r]un  [h]elp  [m]an  [b]ack: ' "$CYN" "$cmd" "$RS"
+    read -r action
+    case "$action" in
+      r|R)
+        printf '  args (Enter for none): '
+        read -r -a argv
+        printf '%s$ %s %s%s\n' "$DIM" "$cmd" "${argv[*]}" "$RS"
+        "$cmd" "${argv[@]}"
+        printf '%s[exit %d]%s\n' "$DIM" "$?" "$RS"
+        ;;
+      m|M) show_usage "$cmd" ;;
+      h|H|"") "$cmd" --help 2>&1 | head -80 ;;
+      b|B) : ;;
+      *) printf '  %sunknown choice%s\n' "$DIM" "$RS";;
+    esac
+  done
+}
+
+show_pkg(){
+  local pkg="$1"
+  dpkg-query -W "$pkg" >/dev/null 2>&1 || die "'$pkg' is not installed.  Try:  pkgkey -s $pkg"
+  local summ; summ=$(dpkg-query -W -f='${binary:Summary}' "$pkg" 2>/dev/null)
+  printf '%s%s%s%s — %s%s\n' "$B" "$AMBER" "$pkg" "$RS" "$DIM$summ" "$RS"
+
+  local -a CMDS=()
+  local base
+  while IFS= read -r base; do
+    [ -n "$base" ] && CMDS+=("$base")
+  done < <(cmds_of "$pkg")
+
+  if [ "${#CMDS[@]}" -eq 0 ]; then
+    printf '  %s(no commands — likely a library or data package)%s\n' "$DIM" "$RS"
+    return 0
+  fi
+
+  local i desc
+  for i in "${!CMDS[@]}"; do
+    base="${CMDS[$i]}"
+    desc=$(describe "$base")
+    if [ -n "$desc" ]; then
+      printf '  %s%2d)%s %s%-18s%s %s%s%s\n' "$AMBER" "$((i+1))" "$RS" "$CYN" "$base" "$RS" "$DIM" "$desc" "$RS"
+    else
+      printf '  %s%2d)%s %s%-18s%s %sno man page — has --help%s\n' "$AMBER" "$((i+1))" "$RS" "$CYN" "$base" "$RS" "$DIM" "$RS"
+    fi
+  done
+
+  if [ -t 0 ] && [ -t 1 ]; then
+    interactive_use CMDS
+  else
+    printf '\n%sUse one:%s  pkgkey -u <command>\n' "$DIM" "$RS"
+  fi
+}
+
+who_owns(){
+  local cmd="$1" full pkg
+  [ -n "$cmd" ] || die "which command?  pkgkey -c <command>"
+  full=$(command -v "$cmd" 2>/dev/null) || true
+  if [ -z "$full" ]; then
+    printf "%s'%s' isn't on your PATH — not installed, or a shell builtin.%s\n" "$DIM" "$cmd" "$RS"; return 1
+  fi
+  pkg=$(dpkg -S "$full" 2>/dev/null | head -1 | cut -d: -f1)
+  printf '%s%s%s  ->  %s\n' "$CYN" "$cmd" "$RS" "$full"
+  [ -n "$pkg" ] && printf 'from package: %s%s%s\n' "$GRN" "$pkg" "$RS" \
+                || printf '%snot tracked by dpkg%s\n' "$DIM" "$RS"
+  local desc; desc=$(describe "$cmd")
+  [ -n "$desc" ] && printf '%s%s%s\n' "$DIM" "$desc" "$RS"
+}
+
+export_all(){
+  local out="${1:-packages-commands.md}" pkg cmds summ c d
+  {
+    printf '# Installed packages & their commands\n'
+    printf '_Generated by pkgkey — %s_\n\n' "$(date)"
+    dpkg-query -W -f='${binary:Package}\n' 2>/dev/null | sort | while read -r pkg; do
+      cmds=$(cmds_of "$pkg"); [ -z "$cmds" ] && continue
+      summ=$(dpkg-query -W -f='${binary:Summary}' "$pkg" 2>/dev/null)
+      printf '## %s\n%s\n\n' "$pkg" "$summ"
+      while read -r c; do
+        [ -n "$c" ] || continue
+        d=$(describe "$c")
+        if [ -n "$d" ]; then printf -- '- `%s` — %s\n' "$c" "$d"; else printf -- '- `%s`\n' "$c"; fi
+      done <<< "$cmds"
+      printf '\n'
+    done
+  } > "$out"
+  printf 'Wrote %s%s%s\n' "$GRN" "$out" "$RS"
+}
+
+usage(){
+  cat <<EOF
+${B}pkgkey${RS} — the key to your installed packages
+
+${AMBER}Usage${RS}
+  pkgkey                 list every installed package + summary
+  pkgkey <package>       show that package's commands, then use them
+  pkgkey -s <term>       search packages by name or description
+  pkgkey -c <command>    which package a command came from
+  pkgkey -u <command>    full usage (man page, or --help)
+  pkgkey -o [file.md]    export ALL packages + commands to a file
+  pkgkey -h              this help
+
+${AMBER}Using commands${RS}
+  Run  pkgkey <package>  in a terminal and it lists the commands numbered.
+  Pick a number, then choose:  [r]un  [h]elp  [m]an  [b]ack.
+  'run' lets you type args; the command runs right there.
+EOF
+}
+
+case "$1" in
+  ""|-l|--list) list_packages ;;
+  -s|--search)  shift; search "$1" ;;
+  -c|--command) shift; who_owns "$1" ;;
+  -u|--usage)   shift; show_usage "$1" ;;
+  -o|--export)  shift; export_all "$1" ;;
+  -h|--help)    usage ;;
+  -*)           die "unknown option: $1  (try: pkgkey -h)" ;;
+  *)            show_pkg "$1" ;;
+esac

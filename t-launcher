@@ -1,0 +1,357 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Termux Launcher v3
+# Color-coded file browser with smart run/view actions.
+#  - Dirs listed first, live preview pane (Ctrl+P hides/shows it)
+#  - Action menu tailored to each file type, best option starred
+#  - Scripts run inside their own folder
+#  - pkgkey: searchable package picker with preview
+#  - fkey: its suggested commands, filled in with your file, ready to run
+#  - your ~/bin tools one tap away
+#  - ".." always goes up; Esc goes back like a browser
+#  - One MENU entry: desktop, fieldkit, tools, sync, downloads...
+#
+# Install/upgrade:  bash termux-launcher.sh --install
+# Requires: fzf
+# ============================================================
+
+set -uo pipefail
+
+# ---------- Self-install (backs up old version, syncs to GitHub) ----------
+if [ "${1:-}" = "--install" ]; then
+  SELF="$(readlink -f "$0")"
+  TARGET="$(grep -o '[^ =]*launcher[^ ]*\.sh' "$HOME/.zshrc" 2>/dev/null | head -1 \
+    | sed -e "s#^[\"']##" -e "s#[\"']\$##" -e "s#~#$HOME#" -e "s#\\\$HOME#$HOME#")"
+  [ -n "$TARGET" ] || TARGET="$HOME/bin/termux-launcher.sh"
+  [ "$SELF" = "$TARGET" ] && { echo "Already running the installed copy."; exit 0; }
+  mkdir -p "$(dirname "$TARGET")" "$HOME/.toolkit-backup"
+  if [ -f "$TARGET" ]; then
+    cp "$TARGET" "$HOME/.toolkit-backup/old-launcher-$(date +%Y%m%d-%H%M%S).sh"
+    echo -e "\033[1;32m  ✓\033[0m Old launcher backed up to ~/.toolkit-backup/"
+  fi
+  cp "$SELF" "$TARGET" && chmod +x "$TARGET"
+  echo -e "\033[1;32m  ✓\033[0m Installed to $TARGET"
+  if ! grep -q 'alias t-launcher=' "$HOME/.zshrc" 2>/dev/null; then
+    echo "alias t-launcher='bash $TARGET'" >> "$HOME/.zshrc"
+    echo -e "\033[1;32m  ✓\033[0m Added t-launcher alias"
+  fi
+  command -v toolkit-sync >/dev/null && toolkit-sync
+  echo -e "\nOpen a new Termux session (or run: source ~/.zshrc), then type: t-launcher"
+  exit 0
+fi
+
+# ---------- Colors ----------
+C_RESET="\033[0m"
+C_DIR="\033[1;34m"
+C_SCRIPT="\033[1;32m"
+C_EXEC="\033[1;31m"
+C_ARCHIVE="\033[1;35m"
+C_PKG="\033[38;5;208m"
+C_WEB="\033[1;36m"
+C_TEXT="\033[0;37m"
+C_OPT="\033[1;33m"
+C_OTHER="\033[0m"
+
+MENU_ENTRY="::MENU:: packages, tools, shortcuts..."
+FIELDKIT_DIR="$HOME/fieldkit"
+DL="/storage/emulated/0/Download"
+[ -d "$DL" ] || DL="$HOME/storage/downloads"
+SHOW_HIDDEN=0
+
+# ---------- Navigation stack ----------
+declare -a NAV_STACK=("$PWD")
+[ -d "${1:-}" ] && NAV_STACK=("$(readlink -f "$1")")
+current_dir() { printf '%s' "${NAV_STACK[-1]}"; }
+push_dir()    { NAV_STACK+=("$1"); }
+pop_dir()     { [ "${#NAV_STACK[@]}" -gt 1 ] && unset 'NAV_STACK[-1]'; }
+
+need() { command -v "$1" >/dev/null 2>&1; }
+msg() {
+  echo -e "$1"
+  read -n 1 -s -r -p "Press any key to continue..."
+  echo
+}
+pick() { # pick "Header" option... -> prints choice
+  local h="$1"; shift
+  printf '%s\n' "$@" | fzf --header="$h" --height=60% --reverse
+}
+
+# ---------- File type tag (no subshells, fast in big folders) ----------
+tag_for() {
+  local f="$1" b="${1##*/}"
+  case "${b,,}" in
+    *.sh|*.bash|*.zsh|*.py|*.pl|*.rb|*.js) TAG="${C_SCRIPT}[SCRIPT]" ;;
+    *.appimage|*.apk|*.deb)                TAG="${C_PKG}[PKG]" ;;
+    *.html|*.htm)                          TAG="${C_WEB}[WEB]" ;;
+    *.zip|*.tar|*.gz|*.tgz|*.bz2|*.xz|*.7z) TAG="${C_ARCHIVE}[ARCHIVE]" ;;
+    *.txt|*.md|*.conf|*.cfg|*.json|*.yml|*.yaml|*.ini|*.log|*.csv) TAG="${C_TEXT}[TEXT]" ;;
+    *) if [ -x "$f" ]; then TAG="${C_EXEC}[EXEC]"; else TAG="${C_OTHER}[FILE]"; fi ;;
+  esac
+}
+
+# ---------- Listing: dirs first, then files ----------
+build_listing() {
+  local dir="$1" f
+  printf '%b\t%s\n' "${C_DIR}[UP]${C_RESET}" ".."
+  printf '%b\t%s\n' "${C_OPT}[MENU]${C_RESET}" "$MENU_ENTRY"
+  shopt -s nullglob
+  [ "$SHOW_HIDDEN" = 1 ] && shopt -s dotglob
+  for f in "$dir"/*/; do
+    f="${f%/}"; printf '%b\t%s\n' "${C_DIR}[DIR]${C_RESET}" "${f##*/}"
+  done
+  for f in "$dir"/*; do
+    [ -d "$f" ] && continue
+    tag_for "$f"; printf '%b\t%s\n' "${TAG}${C_RESET}" "${f##*/}"
+  done
+  shopt -u dotglob nullglob
+}
+
+PREVIEW='p="$LAUNCH_CUR"/{2}; if [ -d "$p" ]; then ls -p "$p" 2>/dev/null | head -80; elif [ -f "$p" ]; then head -c 4000 "$p" 2>/dev/null | cat -v | head -80; fi'
+
+# ---------- Run helper: runs inside the file's folder, reports exit code ----------
+run_in_dir() { # run_in_dir DIR cmd args...
+  local d="$1"; shift
+  (cd "$d" && "$@")
+  msg "\nFinished (exit code $?)."
+}
+
+extract_here() {
+  local file="$1" dir="${1%/*}" l="${1,,}"
+  case "$l" in
+    *.zip) need unzip || { msg "Run: pkg install unzip"; return; }; run_in_dir "$dir" unzip -o "$file" ;;
+    *.7z)  need 7z    || { msg "Run: pkg install p7zip"; return; }; run_in_dir "$dir" 7z x "$file" ;;
+    *.tar|*.tar.*|*.tgz) run_in_dir "$dir" tar -xvf "$file" ;;
+    *.gz)  run_in_dir "$dir" gunzip -k "$file" ;;
+    *.xz)  run_in_dir "$dir" unxz -k "$file" ;;
+    *.bz2) run_in_dir "$dir" bunzip2 -k "$file" ;;
+  esac
+}
+
+# ---------- fkey: turn its suggestions into runnable commands ----------
+# Loads fkey's own lookup table (no changes to fkey) and captures its commands.
+fkey_cmds() {
+  local fk; fk="$(command -v fkey)" || return 1
+  bash -c '
+    eval "$(sed "/^case \"\$1\" in/,\$d" "$1")"
+    cmd(){ printf "%s\t%s\n" "$1" "$2" >&3; }
+    lookup "$(get_ext "$2")" 3>&1 >/dev/null 2>&1
+  ' _ "$fk" "$1"
+}
+
+fill_name() { # swap fkey placeholders (file.tar.gz, yourfile.x, in.mp4) for the real name
+  local s="$1" q="$2" out="" m re='(^|[[:space:](/'"'"'])(yourfile|file|in)\.[A-Za-z0-9.]+'
+  while [[ $s =~ $re ]]; do
+    m="${BASH_REMATCH[0]}"
+    out+="${s%%"$m"*}${BASH_REMATCH[1]}$q"
+    s="${s#*"$m"}"
+  done
+  printf '%s' "$out$s"
+}
+
+fkey_menu() {
+  local file="$1" base="${1##*/}" dir="${1%/*}" q c d choice i=0
+  q="$(printf '%q' "$base")"
+  local -a cmds=() items=()
+  while IFS=$'\t' read -r c d; do
+    c="$(fill_name "$c" "$q")"
+    cmds+=("$c"); items+=("$i"$'\t'"$c"$'\t'"# $d"); i=$((i+1))
+  done < <(fkey_cmds "$file")
+  [ "${#cmds[@]}" -eq 0 ] && { msg "fkey has no commands for this file type."; return; }
+  choice="$(printf '%s\n' "${items[@]}" | fzf --delimiter '\t' --with-nth=2,3 \
+    --header="fkey commands for $base  (pick, edit, Enter to run)" --height=70% --reverse)" || return
+  c="${cmds[${choice%%$'\t'*}]}"
+  read -r -e -p "$ " -i "$c" c
+  [ -z "$c" ] && return
+  run_in_dir "$dir" bash -c "$c"
+}
+
+# ---------- pkgkey: searchable package picker with live preview ----------
+pkgkey_menu() {
+  local sel pkg
+  while true; do
+    sel="$(pkgkey -l 2>/dev/null | fzf --header="Packages  (type to search, Esc = back)" \
+      --height=95% --reverse --preview 'pkgkey {1} </dev/null 2>/dev/null' \
+      --preview-window=down,50%)" || return
+    pkg="${sel%% *}"; [ -z "$pkg" ] && return
+    clear; pkgkey "$pkg"
+    msg ""
+  done
+}
+
+# ---------- Action menu, tailored to the file type ----------
+run_action_menu() {
+  local file="$1" base="${1##*/}" dir="${1%/*}" l choice rc name
+  l="${base,,}"
+  local -a opts=()
+  add() { local o; for o in "${opts[@]}"; do [ "$o" = "$1" ] && return; done; opts+=("$1"); }
+
+  # best guess first
+  case "$l" in
+    *.py)          add "Run: python" ;;
+    *.sh|*.bash)   add "Run: bash" ;;
+    *.zsh)         add "Run: zsh" ;;
+    *.js)          add "Run: node" ;;
+    *.html|*.htm)  add "Open in browser" ;;
+    *.apk)         need apkscan && add "Scan with apkscan" ;;
+    *.zip|*.tar|*.tar.*|*.tgz|*.gz|*.bz2|*.xz|*.7z) add "Extract here" ;;
+    *.txt|*.md|*.conf|*.cfg|*.json|*.yml|*.yaml|*.ini|*.log|*.csv) add "View" ;;
+  esac
+  local sb; sb="$(head -c 2 "$file" 2>/dev/null | tr -d '\0')"
+  { [ "$sb" = '#!' ] || [ -x "$file" ]; } && add "Run directly (./$base)"
+  local starred="${#opts[@]}"
+
+  need fkey && add "Commands for this file (fkey)"
+  need fkey && add "What is this? (fkey)"
+  [ "$dir" = "${PREFIX:-/none}/bin" ] && need pkgkey && add "Which package is this from? (pkgkey)"
+  add "View"; add "Edit (nano)"
+  add "Run: bash"; add "Run: python"; add "Run: custom interpreter"
+  add "Install to ~/bin as a command"
+  add "chmod +x only"
+  add "Back"
+  [ "$starred" -gt 0 ] && opts[0]="★ ${opts[0]}"
+
+  choice="$(pick "Actions for: $base" "${opts[@]}")" || return
+  choice="${choice#★ }"
+
+  case "$choice" in
+    "Run: bash")   chmod +x "$file" 2>/dev/null; run_in_dir "$dir" bash "$file" ;;
+    "Run: zsh")    chmod +x "$file" 2>/dev/null; run_in_dir "$dir" zsh "$file" ;;
+    "Run: node")   run_in_dir "$dir" node "$file" ;;
+    "Run: python") chmod +x "$file" 2>/dev/null
+                   if need python; then run_in_dir "$dir" python "$file"; else run_in_dir "$dir" python3 "$file"; fi ;;
+    "Run directly"*) chmod +x "$file" 2>/dev/null; run_in_dir "$dir" "./$base" ;;
+    "Run: custom interpreter")
+      read -r -e -p "Interpreter (e.g. node, perl, ruby): " name
+      if [ -n "$name" ] && need "$name"; then run_in_dir "$dir" "$name" "$file"
+      else msg "'$name' not found. Nothing was run."; fi ;;
+    "Open in browser") termux-open "$file" 2>/dev/null || termux-open-url "file://$file" ;;
+    "Scan with apkscan") run_in_dir "$dir" apkscan "$file" ;;
+    "Extract here") extract_here "$file" ;;
+    "Commands for this file (fkey)") fkey_menu "$file" ;;
+    "What is this? (fkey)") run_in_dir "$dir" fkey "$file" ;;
+    "Which package is this from? (pkgkey)") run_in_dir "$dir" pkgkey -c "$base" ;;
+    "View")        less -R "$file" ;;
+    "Edit (nano)") nano "$file" ;;
+    "Install to ~/bin as a command")
+      read -r -e -p "Command name: " -i "${base%.*}" name
+      [ -z "$name" ] && return
+      mkdir -p "$HOME/bin"
+      if cp "$file" "$HOME/bin/$name" && chmod +x "$HOME/bin/$name"; then
+        msg "Installed. Type '$name' from anywhere."
+      else msg "Copy failed."; fi ;;
+    "chmod +x only")
+      if chmod +x "$file"; then msg "chmod +x applied to $base."
+      else msg "chmod failed on $base (check permissions)."; fi ;;
+    *) : ;;
+  esac
+}
+
+# ---------- Menus ----------
+HAS_DESK=""
+has_desk() { # checked once: desk as a command, or as a zsh alias/function
+  if [ -z "$HAS_DESK" ]; then
+    if need desk || { need zsh && zsh -ic 'whence -w desk' </dev/null >/dev/null 2>&1; }
+    then HAS_DESK=1; else HAS_DESK=0; fi
+  fi
+  [ "$HAS_DESK" = 1 ]
+}
+
+launch_desk() {
+  if need desk; then desk
+  else zsh -ic 'desk' || msg "Couldn't find the desk command."; fi
+}
+
+launch_fieldkit() {
+  [ -d "$FIELDKIT_DIR" ] || { msg "~/fieldkit not found."; return; }
+  if ! pgrep -f "http.server 8080" >/dev/null 2>&1; then
+    (cd "$FIELDKIT_DIR" && nohup python3 -m http.server 8080 >/dev/null 2>&1 &)
+    sleep 1
+  fi
+  termux-open-url "http://localhost:8080/index.html"
+}
+
+tools_menu() {
+  local -a tools=(); local t choice
+  shopt -s nullglob
+  for t in "$HOME/bin"/*; do [ -f "$t" ] && [ -x "$t" ] && tools+=("${t##*/}"); done
+  shopt -u nullglob
+  [ "${#tools[@]}" -eq 0 ] && { msg "No tools in ~/bin yet."; return; }
+  choice="$(pick "My tools (runs in $(current_dir))" "${tools[@]}" "Back")" || return
+  [ "$choice" = "Back" ] && return
+  local -a args=()
+  read -r -e -p "Arguments for $choice (Enter for none): " -a args
+  run_in_dir "$(current_dir)" "$HOME/bin/$choice" "${args[@]}"
+}
+
+options_menu() {
+  local -a fms=(); local fm choice
+  for fm in yazi mc ranger nnn; do need "$fm" && fms+=("$fm"); done
+  [ "${#fms[@]}" -eq 0 ] && { msg "No other file managers found. Try: pkg install yazi"; return; }
+  choice="$(pick "Open this folder with..." "${fms[@]}" "Back")" || return
+  [ "$choice" = "Back" ] && return
+  (cd "$(current_dir)" && "$choice") || msg "$choice exited with an error."
+}
+
+main_menu() {
+  local hid choice
+  [ "$SHOW_HIDDEN" = 1 ] && hid="Hide hidden files" || hid="Show hidden files"
+  local -a items=()
+  need pkgkey && items+=("Packages (pkgkey)")
+  need fkey   && items+=("File types (fkey)")
+  [ -d "$HOME/bin" ]       && items+=("My tools (~/bin)")
+  has_desk                 && items+=("Desktop (XFCE)")
+  [ -d "$FIELDKIT_DIR" ]   && items+=("Fieldkit")
+  need toolkit-sync        && items+=("Sync toolkit to GitHub")
+  items+=("Go to Downloads" "Go to home" "$hid" "Other file managers" "Back")
+  choice="$(pick "Menu" "${items[@]}")" || return
+  case "$choice" in
+    "Packages (pkgkey)")  pkgkey_menu ;;
+    "File types (fkey)")
+      local x; read -r -e -p "Extension or filename (e.g. apk, tar.gz): " x
+      [ -n "$x" ] && { fkey "$x"; msg ""; } ;;
+    "My tools (~/bin)")   tools_menu ;;
+    "Desktop (XFCE)")     launch_desk ;;
+    "Fieldkit")           launch_fieldkit ;;
+    "Sync toolkit to GitHub")
+      if need toolkit-sync; then toolkit-sync; msg "\nSync finished."
+      else msg "toolkit-sync not found in ~/bin."; fi ;;
+    "Go to Downloads")    push_dir "$DL" ;;
+    "Go to home")         push_dir "$HOME" ;;
+    "Show hidden files")  SHOW_HIDDEN=1 ;;
+    "Hide hidden files")  SHOW_HIDDEN=0 ;;
+    "Other file managers") options_menu ;;
+  esac
+}
+
+# ---------- Main loop ----------
+main() {
+  need fzf || { echo -e "${C_EXEC}fzf is not installed.${C_RESET} Run: pkg install fzf"; exit 1; }
+  local sel base target hdr up
+
+  while true; do
+    export LAUNCH_CUR; LAUNCH_CUR="$(current_dir)"
+    hdr="$LAUNCH_CUR"; [ "$SHOW_HIDDEN" = 1 ] && hdr+="  [hidden on]"
+    sel="$(build_listing "$LAUNCH_CUR" | fzf --ansi --delimiter '\t' --with-nth=1,2 \
+      --header="$hdr   (Esc = back, Ctrl+P = preview)" --height=95% --reverse \
+      --preview "$PREVIEW" --preview-window=down,40% --bind 'ctrl-p:toggle-preview')"
+
+    if [ -z "$sel" ]; then
+      if [ "${#NAV_STACK[@]}" -gt 1 ]; then pop_dir; continue; else break; fi
+    fi
+
+    base="${sel#*$'\t'}"
+    case "$base" in
+      ..)
+        up="$(dirname "$LAUNCH_CUR")"
+        if [ "${#NAV_STACK[@]}" -gt 1 ] && [ "${NAV_STACK[-2]}" = "$up" ]; then pop_dir
+        else push_dir "$up"; fi ;;
+      "$MENU_ENTRY") main_menu ;;
+      *)
+        target="${LAUNCH_CUR%/}/$base"
+        if [ -d "$target" ]; then push_dir "$target"
+        elif [ -e "$target" ]; then run_action_menu "$target"
+        else msg "That entry no longer exists - refreshing."; fi ;;
+    esac
+  done
+}
+
+main
