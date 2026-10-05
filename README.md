@@ -4,7 +4,7 @@
 Browse your files, see what anything is, and run it, all from one fuzzy-search menu.
 Comes with **pkgkey** (what can my installed packages do?) and **fkey** (what is this file and how do I use it?).
 
-<img src="screenshots/1.jpg" width="260"> 
+<img src="screenshots/1.jpg" width="260"> <img src="screenshots/2.jpg" width="260"> <img src="screenshots/3.jpg" width="260"> 
 
 ## Install
 
