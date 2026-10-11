@@ -1,0 +1,115 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# fmget - one-stop installer for the top 10 Termux file managers (part of t-launcher)
+#
+#   fmget              pick from a menu (Tab marks several, Enter installs)
+#   fmget all          install all 10
+#   fmget yazi nnn     install just those
+#   fmget -l           list them and what's installed
+#   fmget -r <name>    remove one
+#   fmget --extras     yazi's preview helpers (images, video, PDF, search, jump)
+#
+# Every one of these is in the official Termux repo, so installs come
+# straight from `pkg` - nothing gets built or downloaded from random sites.
+# ============================================================
+
+set -uo pipefail
+G="\033[1;32m"; Y="\033[1;33m"; C="\033[1;36m"; D="\033[2m"; R="\033[0m"
+
+# name | package | one-liner
+FMS=(
+  "yazi|yazi|Blazing fast, async, image previews - the power-user pick"
+  "mc|mc|Midnight Commander - classic two-pane, menus, mouse/touch friendly"
+  "ranger|ranger|Vim keys, three columns, file previews"
+  "nnn|nnn|Tiny and very fast, plugins for everything"
+  "lf|lf|ranger-style but a single fast Go binary"
+  "vifm|vifm|Two panes with full vim-style commands"
+  "broot|broot|Tree view - type to filter the whole folder tree"
+  "clifm|clifm|Shell-like: browse files by typing commands"
+  "fff|fff|Dead simple and fast, written in pure bash"
+  "walk|walk|Minimal: arrow around, Enter to cd there"
+)
+YAZI_EXTRAS="ffmpeg poppler fd ripgrep zoxide imagemagick jq chafa 7zip"
+
+need() { command -v "$1" >/dev/null 2>&1; }
+field() { local IFS='|'; local -a a; read -r -a a <<<"$1"; printf '%s' "${a[$2]}"; }
+find_fm() { local e; for e in "${FMS[@]}"; do [ "$(field "$e" 0)" = "$1" ] && { printf '%s' "$e"; return 0; }; done; return 1; }
+
+status_line() { # pretty row for lists/menus
+  local e="$1" n; n="$(field "$e" 0)"
+  if need "$n"; then printf "${G}✓ %-7s${R} ${D}%s${R}\n" "$n" "$(field "$e" 2)"
+  else               printf "${Y}· %-7s${R} %s\n" "$n" "$(field "$e" 2)"; fi
+}
+
+list() {
+  echo -e "${C}Termux file managers${R}   (${G}✓${R} installed)\n"
+  local e; for e in "${FMS[@]}"; do status_line "$e"; done
+  local have=0; for e in "${FMS[@]}"; do need "$(field "$e" 0)" && have=$((have+1)); done
+  echo -e "\n$have of ${#FMS[@]} installed."
+}
+
+install_names() { # install_names name... ; returns 1 if any failed
+  local n e p ok=() bad=() skip=()
+  pkg update -y >/dev/null 2>&1 || true
+  for n in "$@"; do
+    e="$(find_fm "$n")" || { echo -e "${Y}Unknown: $n${R} (fmget -l shows the list)"; bad+=("$n"); continue; }
+    if need "$n"; then skip+=("$n"); continue; fi
+    p="$(field "$e" 1)"
+    echo -e "\n${C}==> Installing $n${R}"
+    if pkg install -y "$p" && { hash -r; need "$n"; }; then ok+=("$n"); else bad+=("$n"); fi
+  done
+  echo
+  [ ${#ok[@]}   -gt 0 ] && echo -e "${G}Installed:${R} ${ok[*]}"
+  [ ${#skip[@]} -gt 0 ] && echo -e "${D}Already had:${R} ${skip[*]}"
+  [ ${#bad[@]}  -gt 0 ] && { echo -e "${Y}Failed:${R} ${bad[*]}  (try: pkg update && fmget ${bad[*]})"; return 1; }
+  return 0
+}
+
+install_extras() {
+  echo -e "${C}==> yazi preview helpers:${R} $YAZI_EXTRAS"
+  pkg install -y $YAZI_EXTRAS
+  need yazi || echo -e "${Y}Tip:${R} yazi itself isn't installed yet - run: fmget yazi"
+}
+
+remove_name() {
+  local e; e="$(find_fm "$1")" || { echo "Unknown: $1"; return 1; }
+  pkg uninstall -y "$(field "$e" 1)"
+}
+
+menu() {
+  need fzf || pkg install -y fzf
+  local -a rows=() picked=(); local e line n
+  rows+=("★ Install ALL 10")
+  for e in "${FMS[@]}"; do rows+=("$(status_line "$e")"); done
+  rows+=("+ yazi extras (image/video/PDF previews, fd, ripgrep, zoxide)")
+  rows+=("- Remove a file manager")
+
+  local out
+  out="$(printf '%s\n' "${rows[@]}" | fzf --ansi --multi --reverse --height=80% \
+    --header=$'File managers  (Tab = mark several, Enter = install, Esc = quit)\n✓ = already installed')" || return 0
+
+  while IFS= read -r line; do
+    case "$line" in
+      "★ Install ALL"*) for e in "${FMS[@]}"; do picked+=("$(field "$e" 0)"); done ;;
+      "+ yazi extras"*) install_extras ;;
+      "- Remove"*)
+        local -a inst=(); for e in "${FMS[@]}"; do n="$(field "$e" 0)"; need "$n" && inst+=("$n"); done
+        [ ${#inst[@]} -eq 0 ] && { echo "None installed."; continue; }
+        n="$(printf '%s\n' "${inst[@]}" | fzf --reverse --height=50% --header="Remove which?")" || continue
+        remove_name "$n" ;;
+      *) n="$(sed 's/\x1b\[[0-9;]*m//g' <<<"$line" | awk '{print $2}')"; [ -n "$n" ] && picked+=("$n") ;;
+    esac
+  done <<<"$out"
+
+  [ ${#picked[@]} -gt 0 ] && install_names "${picked[@]}"
+  echo; list
+}
+
+case "${1:-}" in
+  "")            menu ;;
+  -l|--list)     list ;;
+  all|--all)     install_names $(for e in "${FMS[@]}"; do field "$e" 0; echo; done) ;;
+  --extras)      install_extras ;;
+  -r|--remove)   shift; [ $# -gt 0 ] || { echo "Usage: fmget -r <name>"; exit 1; }; for n in "$@"; do remove_name "$n"; done ;;
+  -h|--help)     sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *)             install_names "$@" ;;
+esac

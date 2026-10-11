@@ -1,6 +1,8 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# Termux Launcher v3
+# Termux Launcher v4
 # Color-coded file browser with smart run/view actions.
+#  - Enter opens any file with the right thing (via topen); Tab = action menu
+#  - 10 file managers one tap away, installed for you with fmget
 #  - Dirs listed first, live preview pane (Ctrl+P hides/shows it)
 #  - Action menu tailored to each file type, best option starred
 #  - Scripts run inside their own folder
@@ -49,6 +51,8 @@ C_PKG="\033[38;5;208m"
 C_WEB="\033[1;36m"
 C_TEXT="\033[0;37m"
 C_OPT="\033[1;33m"
+C_MEDIA="\033[38;5;213m"
+C_DOC="\033[38;5;180m"
 C_OTHER="\033[0m"
 
 MENU_ENTRY="::MENU:: packages, tools, shortcuts..."
@@ -82,7 +86,12 @@ tag_for() {
     *.sh|*.bash|*.zsh|*.py|*.pl|*.rb|*.js) TAG="${C_SCRIPT}[SCRIPT]" ;;
     *.appimage|*.apk|*.deb)                TAG="${C_PKG}[PKG]" ;;
     *.html|*.htm)                          TAG="${C_WEB}[WEB]" ;;
-    *.zip|*.tar|*.gz|*.tgz|*.bz2|*.xz|*.7z) TAG="${C_ARCHIVE}[ARCHIVE]" ;;
+    *.jpg|*.jpeg|*.png|*.gif|*.webp|*.bmp|*.heic|*.svg) TAG="${C_MEDIA}[IMAGE]" ;;
+    *.mp3|*.m4a|*.aac|*.flac|*.wav|*.ogg|*.opus)        TAG="${C_MEDIA}[AUDIO]" ;;
+    *.mp4|*.mkv|*.webm|*.avi|*.mov|*.3gp)               TAG="${C_MEDIA}[VIDEO]" ;;
+    *.pdf|*.epub|*.doc|*.docx|*.xls|*.xlsx|*.ppt|*.pptx|*.odt) TAG="${C_DOC}[DOC]" ;;
+    *.db|*.sqlite|*.sqlite3)               TAG="${C_DOC}[DB]" ;;
+    *.zip|*.tar|*.gz|*.tgz|*.bz2|*.xz|*.7z|*.rar|*.zst) TAG="${C_ARCHIVE}[ARCHIVE]" ;;
     *.txt|*.md|*.conf|*.cfg|*.json|*.yml|*.yaml|*.ini|*.log|*.csv) TAG="${C_TEXT}[TEXT]" ;;
     *) if [ -x "$f" ]; then TAG="${C_EXEC}[EXEC]"; else TAG="${C_OTHER}[FILE]"; fi ;;
   esac
@@ -118,7 +127,7 @@ extract_here() {
   local file="$1" dir="${1%/*}" l="${1,,}"
   case "$l" in
     *.zip) need unzip || { msg "Run: pkg install unzip"; return; }; run_in_dir "$dir" unzip -o "$file" ;;
-    *.7z)  need 7z    || { msg "Run: pkg install p7zip"; return; }; run_in_dir "$dir" 7z x "$file" ;;
+    *.7z)  need 7z    || { msg "Run: pkg install 7zip"; return; }; run_in_dir "$dir" 7z x "$file" ;;
     *.tar|*.tar.*|*.tgz) run_in_dir "$dir" tar -xvf "$file" ;;
     *.gz)  run_in_dir "$dir" gunzip -k "$file" ;;
     *.xz)  run_in_dir "$dir" unxz -k "$file" ;;
@@ -184,7 +193,12 @@ run_action_menu() {
   local -a opts=()
   add() { local o; for o in "${opts[@]}"; do [ "$o" = "$1" ] && return; done; opts+=("$1"); }
 
-  # best guess first
+  # best guess first: topen's pick, then the classic per-type guess
+  local how=""
+  if need topen; then
+    how="$(topen -n "$file" 2>/dev/null | sed -n 's/^  opens with: //p')"
+    [ -n "$how" ] && add "Open → $how"
+  fi
   case "$l" in
     *.py)          add "Run: python" ;;
     *.sh|*.bash)   add "Run: bash" ;;
@@ -213,6 +227,7 @@ run_action_menu() {
   choice="${choice#★ }"
 
   case "$choice" in
+    "Open → "*)    topen --pause "$file" ;;
     "Run: bash")   chmod +x "$file" 2>/dev/null; run_in_dir "$dir" bash "$file" ;;
     "Run: zsh")    chmod +x "$file" 2>/dev/null; run_in_dir "$dir" zsh "$file" ;;
     "Run: node")   run_in_dir "$dir" node "$file" ;;
@@ -282,13 +297,28 @@ tools_menu() {
   run_in_dir "$(current_dir)" "$HOME/bin/$choice" "${args[@]}"
 }
 
+FILE_MANAGERS="yazi mc ranger nnn lf vifm broot clifm fff walk"
+
 options_menu() {
-  local -a fms=(); local fm choice
-  for fm in yazi mc ranger nnn; do need "$fm" && fms+=("$fm"); done
-  [ "${#fms[@]}" -eq 0 ] && { msg "No other file managers found. Try: pkg install yazi"; return; }
-  choice="$(pick "Open this folder with..." "${fms[@]}" "Back")" || return
-  [ "$choice" = "Back" ] && return
-  (cd "$(current_dir)" && "$choice") || msg "$choice exited with an error."
+  local fm choice
+  local -a rows=()
+  for fm in $FILE_MANAGERS; do
+    if need "$fm"; then rows+=("✓ $fm"); else rows+=("  $fm  (not installed - Enter installs it)"); fi
+  done
+  need fmget && rows+=("Get file managers (fmget)")
+  rows+=("Back")
+  choice="$(pick "Open $(current_dir) with...   ✓ = installed" "${rows[@]}")" || return
+  case "$choice" in
+    Back) return ;;
+    "Get file managers (fmget)") fmget; msg "" ; return ;;
+  esac
+  fm="$(awk '{print ($1=="✓") ? $2 : $1}' <<<"$choice")"
+  if ! need "$fm"; then
+    if need fmget; then fmget "$fm" || { msg "Install of $fm failed."; return; }
+    else pkg install -y "$fm" || { msg "Install of $fm failed."; return; }; fi
+    hash -r
+  fi
+  (cd "$(current_dir)" && "$fm") || msg "$fm exited with an error."
 }
 
 main_menu() {
@@ -301,7 +331,10 @@ main_menu() {
   has_desk                 && items+=("Desktop (XFCE)")
   [ -d "$FIELDKIT_DIR" ]   && items+=("Fieldkit")
   need toolkit-sync        && items+=("Sync toolkit to GitHub")
-  items+=("Go to Downloads" "Go to home" "$hid" "Other file managers" "Back")
+  items+=("Go to Downloads" "Go to home" "$hid" "Other file managers")
+  need fmget && items+=("Get file managers (fmget)")
+  need topen && items+=("Open-with rules (topen)")
+  items+=("Back")
   choice="$(pick "Menu" "${items[@]}")" || return
   case "$choice" in
     "Packages (pkgkey)")  pkgkey_menu ;;
@@ -319,20 +352,29 @@ main_menu() {
     "Show hidden files")  SHOW_HIDDEN=1 ;;
     "Hide hidden files")  SHOW_HIDDEN=0 ;;
     "Other file managers") options_menu ;;
+    "Get file managers (fmget)") fmget; msg "" ;;
+    "Open-with rules (topen)")
+      case "$(pick "topen rules" "Show what opens what" "Add my own rules" "Back")" in
+        "Show what opens what") topen -l | less -R ;;
+        "Add my own rules")     topen -e ;;
+      esac ;;
   esac
 }
 
 # ---------- Main loop ----------
 main() {
   need fzf || { echo -e "${C_EXEC}fzf is not installed.${C_RESET} Run: pkg install fzf"; exit 1; }
-  local sel base target hdr up
+  local out key sel base target hdr up keys
+  need topen && keys="Enter = open, Tab = actions" || keys="Enter = actions"
 
   while true; do
     export LAUNCH_CUR; LAUNCH_CUR="$(current_dir)"
     hdr="$LAUNCH_CUR"; [ "$SHOW_HIDDEN" = 1 ] && hdr+="  [hidden on]"
-    sel="$(build_listing "$LAUNCH_CUR" | fzf --ansi --delimiter '\t' --with-nth=1,2 \
-      --header="$hdr   (Esc = back, Ctrl+P = preview)" --height=95% --reverse \
-      --preview "$PREVIEW" --preview-window=down,40% --bind 'ctrl-p:toggle-preview')"
+    out="$(build_listing "$LAUNCH_CUR" | fzf --ansi --delimiter '\t' --with-nth=1,2 \
+      --header="$hdr"$'\n'"$keys, Esc = back, Ctrl+P = preview" --height=95% --reverse \
+      --expect=tab,ctrl-o --preview "$PREVIEW" --preview-window=down,40% --bind 'ctrl-p:toggle-preview')"
+    key="${out%%$'\n'*}"
+    sel=""; [[ $out == *$'\n'* ]] && sel="${out#*$'\n'}"
 
     if [ -z "$sel" ]; then
       if [ "${#NAV_STACK[@]}" -gt 1 ]; then pop_dir; continue; else break; fi
@@ -348,7 +390,9 @@ main() {
       *)
         target="${LAUNCH_CUR%/}/$base"
         if [ -d "$target" ]; then push_dir "$target"
-        elif [ -e "$target" ]; then run_action_menu "$target"
+        elif [ -e "$target" ]; then
+          if [ -z "$key" ] && need topen; then topen --pause "$target"
+          else run_action_menu "$target"; fi
         else msg "That entry no longer exists - refreshing."; fi ;;
     esac
   done

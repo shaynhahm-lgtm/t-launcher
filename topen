@@ -1,0 +1,379 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# topen - smart file opener for Termux (part of t-launcher)
+#
+# Works out what a file really is (by its extension first, then by looking
+# inside it) and opens it with the right thing:
+#   scripts run with the right interpreter, archives extract into a folder,
+#   photos / music / video / PDFs / APKs open in the matching Android app,
+#   text opens in a viewer, configs and code open in your editor.
+# Anything it needs that isn't installed yet gets installed for you.
+#
+#   topen <file>         open it
+#   topen -n <file>      dry run: say what it is and what would open it
+#   topen -l             list what opens what
+#   topen -e             add your own rules (~/.config/topen/rules)
+#   topen <url>          open a link in your browser
+#
+# Your own rules beat the built-in ones. One per line, {} is the file:
+#   md   = glow -p {}
+#   log  = less +G {}
+#   mp3  = mpv {}
+# ============================================================
+
+set -uo pipefail
+
+RULES="${XDG_CONFIG_HOME:-$HOME/.config}/topen/rules"
+C_INFO="\033[1;36m"; C_WARN="\033[1;33m"; C_ERR="\033[1;31m"; C_OK="\033[1;32m"; C_R="\033[0m"
+PAUSE_AFTER=0   # --pause: wait for a key after things that print output
+DRY=0
+
+need() { command -v "$1" >/dev/null 2>&1; }
+say()  { echo -e "${C_INFO}topen:${C_R} $*" >&2; }
+die()  { echo -e "${C_ERR}topen:${C_R} $*" >&2; exit 1; }
+
+# ---------- Auto-install whatever a handler needs ----------
+pkg_for() { # package name(s) to try, newest name first
+  case "$1" in
+    python|python3) echo python ;;          node)    echo nodejs ;;
+    7z)             echo "7zip p7zip" ;;     sqlite3) echo "libsqlite sqlite" ;;
+    java)           echo openjdk-17 ;;       termux-open) echo termux-tools ;;
+    file)           echo "libmagic file" ;;  lua)     echo lua54 ;;
+    *)              echo "$1" ;;
+  esac
+}
+ensure() {
+  need "$1" && return 0
+  local p
+  for p in $(pkg_for "$1"); do
+    say "${C_WARN}'$1' isn't installed - installing '$p' for you...${C_R}"
+    pkg install -y "$p" && { hash -r; need "$1" && return 0; }
+  done
+  echo -e "${C_ERR}Couldn't install $1.${C_R} Try: pkg install $(pkg_for "$1" | cut -d' ' -f1)" >&2
+  return 1
+}
+
+# ---------- Detection: sets KIND (what it is), ACT (how to open), ARG ----------
+ext_kind() { # by file name
+  local l="$1"
+  case "$l" in
+    *.tar|*.tar.gz|*.tgz|*.tar.xz|*.txz|*.tar.bz2|*.tbz|*.tbz2|*.tar.zst|*.tzst)
+                              KIND="Tar archive";        ACT=extract; ARG=tar ;;
+    *.zip)                    KIND="Zip archive";        ACT=extract; ARG=zip ;;
+    *.7z)                     KIND="7-Zip archive";      ACT=extract; ARG=7z ;;
+    *.rar)                    KIND="RAR archive";        ACT=extract; ARG=rar ;;
+    *.gz)                     KIND="Gzip file";          ACT=extract; ARG=gz ;;
+    *.xz)                     KIND="XZ file";            ACT=extract; ARG=xz ;;
+    *.bz2)                    KIND="Bzip2 file";         ACT=extract; ARG=bz2 ;;
+    *.zst)                    KIND="Zstandard file";     ACT=extract; ARG=zst ;;
+    *.sh|*.bash)              KIND="Bash script";        ACT=script;  ARG=bash ;;
+    *.zsh)                    KIND="Zsh script";         ACT=script;  ARG=zsh ;;
+    *.py|*.pyw)               KIND="Python script";      ACT=script;  ARG=python ;;
+    *.js|*.mjs|*.cjs)         KIND="JavaScript";         ACT=script;  ARG=node ;;
+    *.rb)                     KIND="Ruby script";        ACT=script;  ARG=ruby ;;
+    *.pl)                     KIND="Perl script";        ACT=script;  ARG=perl ;;
+    *.php)                    KIND="PHP script";         ACT=script;  ARG=php ;;
+    *.lua)                    KIND="Lua script";         ACT=script;  ARG=lua ;;
+    *.jar)                    KIND="Java app";           ACT=jar ;;
+    *.html|*.htm|*.xhtml)     KIND="Web page";           ACT=android ;;
+    *.apk)                    KIND="Android app";        ACT=apk ;;
+    *.deb)                    KIND="Debian package";     ACT=deb ;;
+    *.appimage)               KIND="AppImage";           ACT=appimage ;;
+    *.jpg|*.jpeg|*.png|*.gif|*.webp|*.bmp|*.heic|*.heif|*.svg|*.ico|*.tif|*.tiff|*.avif)
+                              KIND="Image";              ACT=android ;;
+    *.mp3|*.m4a|*.aac|*.flac|*.wav|*.ogg|*.oga|*.opus|*.wma|*.mid|*.midi|*.amr)
+                              KIND="Audio";              ACT=android ;;
+    *.mp4|*.mkv|*.webm|*.avi|*.mov|*.3gp|*.m4v|*.wmv|*.flv|*.mpg|*.mpeg)
+                              KIND="Video";              ACT=android ;;
+    *.pdf|*.epub|*.doc|*.docx|*.odt|*.rtf|*.xls|*.xlsx|*.ods|*.ppt|*.pptx|*.odp)
+                              KIND="Document";           ACT=android ;;
+    *.vcf|*.ics)              KIND="Contact/calendar";   ACT=android ;;
+    *.db|*.sqlite|*.sqlite3|*.db3)
+                              KIND="SQLite database";    ACT=sqlite ;;
+    *.json|*.geojson)         KIND="JSON";               ACT=view; ARG=json ;;
+    *.csv|*.tsv)              KIND="Spreadsheet text";   ACT=view; ARG=csv ;;
+    *.md|*.markdown)          KIND="Markdown";           ACT=view; ARG=md ;;
+    *.txt|*.log|*.nfo|*.rst|*.out|*.diff|*.patch)
+                              KIND="Text";               ACT=view ;;
+    *.conf|*.cfg|*.ini|*.yml|*.yaml|*.toml|*.env|*.properties|*.xml|*.service|*.desktop|*rc|*.profile)
+                              KIND="Config file";        ACT=edit ;;
+    *.c|*.h|*.cc|*.cpp|*.hpp|*.rs|*.go|*.java|*.kt|*.swift|*.ts|*.tsx|*.jsx|*.css|*.scss|*.vue|*.dart|*.sql|*.gradle|*.cmake|makefile|dockerfile|*.mk)
+                              KIND="Source code";        ACT=edit ;;
+    *) return 1 ;;
+  esac
+}
+
+is_text() { # no NUL bytes, and valid UTF-8 (or mostly printable)
+  local n
+  n="$(head -c 8000 -- "$1" | LC_ALL=C tr -dc '\000' | wc -c)"
+  [ "$n" -eq 0 ] || return 1
+  if need iconv && head -c 8000 -- "$1" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1; then return 0; fi
+  local total bad
+  total="$(head -c 8000 -- "$1" | wc -c)"
+  bad="$(head -c 8000 -- "$1" | LC_ALL=C tr -d '\011\012\015\040-\176' | wc -c)"
+  [ $((bad * 100)) -lt $((total * 30)) ]
+}
+
+sniff_kind() { # by looking inside the file
+  local f="$1" first magic m
+  [ -s "$f" ] || { KIND="Empty file"; ACT=edit; return; }
+
+  # #! line -> use that interpreter (fixes /bin/bash, /usr/bin/python etc. on Termux)
+  if [ "$(head -c 2 -- "$f" 2>/dev/null | tr -d '\0')" = '#!' ]; then
+    IFS= read -r first < "$f"; first="${first#\#!}"
+    local -a w; read -r -a w <<<"$first"
+    local i="${w[0]:-sh}"; i="${i##*/}"
+    if [ "$i" = env ]; then
+      i=""; local x; for x in "${w[@]:1}"; do [[ $x == -* || $x == *=* ]] && continue; i="${x##*/}"; break; done
+      [ -n "$i" ] || i=sh
+    fi
+    [ "$i" = python3 ] && i=python
+    [ "$i" = nodejs ] && i=node
+    KIND="Script (#!$i)"; ACT=script; ARG="$i"; return
+  fi
+
+  magic="$(head -c 4 -- "$f" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+  case "$magic" in
+    7f454c46)        KIND="Linux program (ELF)"; ACT=exec; return ;;
+    504b0304)        KIND="Zip archive";         ACT=extract; ARG=zip; return ;;
+    1f8b*)           KIND="Gzip file";           ACT=extract; ARG=gz;  return ;;
+    fd377a58)        KIND="XZ file";             ACT=extract; ARG=xz;  return ;;
+    425a68*)         KIND="Bzip2 file";          ACT=extract; ARG=bz2; return ;;
+    28b52ffd)        KIND="Zstandard file";      ACT=extract; ARG=zst; return ;;
+    377abcaf)        KIND="7-Zip archive";       ACT=extract; ARG=7z;  return ;;
+    52617221)        KIND="RAR archive";         ACT=extract; ARG=rar; return ;;
+    25504446)        KIND="PDF";                 ACT=android; return ;;
+    89504e47|ffd8ff*|47494638) KIND="Image";     ACT=android; return ;;
+    53514c69)        KIND="SQLite database";     ACT=sqlite; return ;;
+  esac
+
+  if need file; then
+    m="$(file -b --mime-type -- "$f" 2>/dev/null)"
+    case "$m" in
+      text/html)                      KIND="Web page"; ACT=android; return ;;
+      image/*)                        KIND="Image";    ACT=android; return ;;
+      audio/*)                        KIND="Audio";    ACT=android; return ;;
+      video/*)                        KIND="Video";    ACT=android; return ;;
+      application/vnd.android.package-archive) KIND="Android app"; ACT=apk; return ;;
+      application/vnd.debian.binary-package)   KIND="Debian package"; ACT=deb; return ;;
+      application/x-tar)              KIND="Tar archive"; ACT=extract; ARG=tar; return ;;
+      application/json)               KIND="JSON"; ACT=view; ARG=json; return ;;
+      application/msword|application/vnd.*officedocument*|application/vnd.oasis*|application/epub*)
+                                      KIND="Document"; ACT=android; return ;;
+    esac
+  fi
+
+  if is_text "$f"; then
+    if [ -x "$f" ]; then KIND="Text (executable, no #!)"; ACT=script; ARG=bash
+    else KIND="Text"; ACT=view; fi
+  else
+    KIND="Binary file (unknown type)"; ACT=info
+  fi
+}
+
+rule_kind() { # your own rules win
+  [ -f "$RULES" ] || return 1
+  local l="$1" key val
+  while IFS='=' read -r key val; do
+    key="${key//[[:space:]]/}"; key="${key,,}"; key="${key#\*}"; key="${key#.}"
+    [ -z "$key" ] && continue
+    [ "${key:0:1}" = "#" ] && continue
+    if [ "$l" = "$key" ] || [[ $l == *."$key" ]]; then
+      val="${val#"${val%%[![:space:]]*}"}"
+      KIND="Your rule (.$key)"; ACT=rule; ARG="$val"; return 0
+    fi
+  done < "$RULES"
+  return 1
+}
+
+detect() {
+  local f="$1" l="${1##*/}"; l="${l,,}"
+  KIND=""; ACT=""; ARG=""
+  if [ -d "$f" ]; then KIND="Folder"; ACT=dir; return; fi
+  rule_kind "$l" && return
+  ext_kind "$l" && return
+  sniff_kind "$f"
+}
+
+# ---------- What would run (for -n and the header line) ----------
+describe() {
+  local f="$1" q; q="$(printf '%q' "${f##*/}")"
+  case "$ACT" in
+    script)   echo "$ARG $q  (runs in its own folder)" ;;
+    exec)     echo "./$q" ;;
+    jar)      echo "java -jar $q" ;;
+    android)  echo "the matching Android app (termux-open)" ;;
+    apk)      echo "Android's app installer" ;;
+    deb)      echo "apt install ./$q  (asks first)" ;;
+    appimage) echo "appdrop $q" ;;
+    sqlite)   echo "sqlite3 $q" ;;
+    view)     case "$ARG" in
+                json) need jq && echo "jq . $q | less" || echo "less $q" ;;
+                csv)  echo "table view in less" ;;
+                md)   need glow && echo "glow -p $q" || echo "less $q" ;;
+                *)    need bat && echo "bat $q" || echo "less $q" ;;
+              esac ;;
+    edit)     echo "${EDITOR:-nano} $q" ;;
+    extract)  echo "extract into ./$(out_name "${f##*/}")/" ;;
+    info)     echo "file info + hex peek" ;;
+    rule)     echo "${ARG//\{\}/$q}" ;;
+    dir)      echo "t-launcher in that folder" ;;
+  esac
+}
+
+out_name() { # foo.tar.gz -> foo
+  local n="$1" s
+  for s in .tar.gz .tar.xz .tar.bz2 .tar.zst .tgz .txz .tbz2 .tbz .tzst .tar .zip .7z .rar .gz .xz .bz2 .zst; do
+    [[ ${n,,} == *"$s" ]] && { printf '%s' "${n:0:${#n}-${#s}}"; return; }
+  done
+  printf '%s.out' "$n"
+}
+
+# ---------- Handlers ----------
+viewer() {
+  local f="$1"
+  case "$ARG" in
+    json) if need jq; then jq -C . -- "$f" 2>/dev/null | less -R && return; fi ;;
+    csv)  local sep=','; [[ ${f,,} == *.tsv ]] && sep=$'\t'
+          if need column; then column -s "$sep" -t < "$f" | less -S; return; fi ;;
+    md)   if need glow; then glow -p -- "$f"; return; fi ;;
+  esac
+  if need bat; then bat --paging=always -- "$f"; else less -R -- "$f"; fi
+}
+
+extract() {
+  local f="$1" d="${1%/*}" b="${1##*/}" fmt="$ARG" out
+  out="$d/$(out_name "$b")"
+  if [ -e "$out" ]; then local n=2; while [ -e "$out-$n" ]; do n=$((n+1)); done; out="$out-$n"; fi
+  if [ "$fmt" = zst ] || [[ ${b,,} == *.tar.zst || ${b,,} == *.tzst ]]; then ensure zstd || return 1; fi
+  # a .gz/.xz/.bz2/.zst that is really a tarball
+  case "$fmt" in gz|xz|bz2|zst) tar -tf "$f" >/dev/null 2>&1 && fmt=tar ;; esac
+  case "$fmt" in
+    tar|zip|7z|rar) mkdir -p "$out" ;;
+  esac
+  say "Extracting $b -> ${out/#$HOME/\~}"
+  case "$fmt" in
+    tar) tar -xvf "$f" -C "$out" ;;
+    zip) ensure unzip && unzip -o "$f" -d "$out" ;;
+    7z)  ensure 7z && 7z x -y -o"$out" "$f" ;;
+    rar) ensure unrar && unrar x -o+ "$f" "$out/" ;;
+    gz)  gzip  -dc -- "$f" > "$out" ;;
+    xz)  xz    -dc -- "$f" > "$out" ;;
+    bz2) bzip2 -dc -- "$f" > "$out" ;;
+    zst) zstd  -dc -- "$f" > "$out" ;;
+  esac
+  local rc=$?
+  [ $rc -eq 0 ] && echo -e "${C_OK}Done:${C_R} ${out/#$HOME/\~}"
+  return $rc
+}
+
+run_exec() {
+  local f="$1" d="${1%/*}" b="${1##*/}" run="$1"
+  case "$f" in
+    /storage/*|/sdcard/*)   # shared storage can't run programs - run a copy instead
+      run="${TMPDIR:-$PREFIX/tmp}/topen-$b"; cp -f -- "$f" "$run" || return 1
+      say "Shared storage can't run programs, running a copy from \$TMPDIR" ;;
+  esac
+  chmod +x "$run" 2>/dev/null
+  (cd "$d" && "$run")
+}
+
+do_open() {
+  local f="$1" d="${1%/*}" b="${1##*/}" rc=0
+  [ -n "$d" ] || d=/
+  case "$ACT" in
+    dir)      if need t-launcher; then t-launcher "$f"; else ls -la "$f"; fi; PAUSE_AFTER=0 ;;
+    script)   ensure "$ARG" || return 1
+              chmod +x "$f" 2>/dev/null
+              (cd "$d" && "$ARG" "$f"); rc=$? ;;
+    exec)     run_exec "$f"; rc=$? ;;
+    jar)      ensure java || return 1; (cd "$d" && java -jar "$f"); rc=$? ;;
+    android)  ensure termux-open || return 1; termux-open "$f"; rc=$?; PAUSE_AFTER=0 ;;
+    apk)      ensure termux-open || return 1; say "Opening Android's installer for $b"
+              termux-open "$f"; rc=$?; PAUSE_AFTER=0 ;;
+    deb)      local yn; read -r -p "Install $b with apt? [Y/n] " yn
+              [[ ${yn,,} == n* ]] && return 0
+              apt install -y "$f"; rc=$? ;;
+    appimage) if need appdrop; then appdrop "$f"; rc=$?
+              else echo "AppImages need a full Linux (proot-distro) to run - appdrop isn't installed here."; rc=1; fi ;;
+    sqlite)   ensure sqlite3 || return 1; sqlite3 "$f"; rc=$?; PAUSE_AFTER=0 ;;
+    view)     viewer "$f"; rc=$?; PAUSE_AFTER=0 ;;
+    edit)     if [ -z "${EDITOR:-}" ]; then ensure nano || return 1; nano "$f"
+              else $EDITOR "$f"; fi; rc=$?; PAUSE_AFTER=0 ;;
+    extract)  extract "$f"; rc=$? ;;
+    info)     if need file; then file -- "$f"; fi
+              echo; od -A x -t x1z -v -- "$f" 2>/dev/null | head -16
+              echo -e "\n${C_WARN}topen doesn't know this type.${C_R} Add a rule with: topen -e" ;;
+    rule)     (cd "$d" && bash -c "${ARG//\{\}/$(printf '%q' "$f")}"); rc=$? ;;
+  esac
+  return $rc
+}
+
+list_rules() {
+  cat <<'EOF'
+What topen opens with what (your rules in ~/.config/topen/rules come first)
+
+  Scripts      .sh .bash .zsh .py .js .rb .pl .php .lua   -> right interpreter, in its folder
+  No extension #! line read -> that interpreter;  ELF program -> run it
+  Archives     .zip .tar(.gz/.xz/.bz2/.zst) .tgz .7z .rar .gz .xz .bz2 .zst -> extract to a folder
+  Android      images, audio, video, PDF, Office, EPUB, HTML -> matching Android app
+  .apk         Android installer          .deb      apt install (asks first)
+  .jar         java -jar                  .AppImage appdrop
+  .db/.sqlite  sqlite3                    JSON/CSV/Markdown/text -> viewer
+  Configs + source code -> $EDITOR (nano)
+  Unknown      sniffed by its first bytes, then `file`, then text vs binary
+EOF
+  if [ -f "$RULES" ]; then echo; echo "Your rules:"; grep -v '^[[:space:]]*\(#\|$\)' "$RULES" | sed 's/^/  /'; fi
+}
+
+edit_rules() {
+  mkdir -p "${RULES%/*}"
+  [ -f "$RULES" ] || cat > "$RULES" <<'EOF'
+# topen rules - these beat the built-in ones.  ext = command   ({} is the file)
+# md  = glow -p {}
+# log = less +G {}
+# mp3 = mpv {}
+EOF
+  ${EDITOR:-nano} "$RULES"
+}
+
+# ---------- Main ----------
+main() {
+  local target=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -n|--dry)  DRY=1 ;;
+      --pause)   PAUSE_AFTER=1 ;;
+      -l|--list) list_rules; exit 0 ;;
+      -e|--edit) edit_rules; exit 0 ;;
+      -h|--help) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+      --)        shift; target="${1:-}"; break ;;
+      *)         target="$1" ;;
+    esac
+    shift
+  done
+  [ -n "$target" ] || { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+
+  if [[ $target =~ ^(https?|ftp)://|^www\. ]]; then
+    [ "$DRY" = 1 ] && { echo "Link -> browser"; exit 0; }
+    termux-open-url "$target"; exit $?
+  fi
+
+  [ -e "$target" ] || die "No such file: $target"
+  local f; f="$(readlink -f -- "$target")"
+  detect "$f"
+
+  if [ "$DRY" = 1 ]; then
+    echo -e "${C_INFO}${f##*/}${C_R}\n  is:         $KIND\n  opens with: $(describe "$f")"
+    exit 0
+  fi
+
+  [ "$PAUSE_AFTER" = 1 ] && echo -e "${C_INFO}${f##*/}${C_R}  ($KIND)  ->  $(describe "$f")\n"
+  do_open "$f"; local rc=$?
+  if [ "$PAUSE_AFTER" = 1 ]; then
+    echo; [ $rc -eq 0 ] && echo -e "${C_OK}Finished.${C_R}" || echo -e "${C_WARN}Finished (exit code $rc).${C_R}"
+    read -n 1 -s -r -p "Press any key to continue..."; echo
+  fi
+  exit $rc
+}
+
+main "$@"
