@@ -1,0 +1,437 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────
+#  tdoctor — checks your Termux setup and fixes what it can
+#
+#  tdoctor           check everything, then offer to fix
+#  tdoctor --fix     check and fix everything, no questions
+#  tdoctor --quick   skip the slow network checks
+#
+#  Saves a plain-text report to ~/.local/share/tdoctor/report.txt
+#  (handy to paste into a chat when something's off).
+# ─────────────────────────────────────────────────────────────
+set -u
+shopt -u patsub_replacement 2>/dev/null || true
+VERSION="1.0"
+
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+BIN="${TDOCTOR_BIN:-$HOME/bin}"
+REGION="${TDOCTOR_REGION:-north_america}"     # mirror group used when the mirror needs resetting
+DATA="${XDG_DATA_HOME:-$HOME/.local/share}/tdoctor"
+REPORT="$DATA/report.txt"
+
+AUTO=0 QUICK=0
+FIX_IDS=() FIX_LABELS=()
+REPORT_LINES=()
+PROBLEMS=0 ONLINE=1
+
+if [[ -t 1 ]]; then
+  G=$'\e[32m' Y=$'\e[33m' R=$'\e[31m' C=$'\e[36m' D=$'\e[2m' B=$'\e[1m' N=$'\e[0m'
+else
+  G='' Y='' R='' C='' D='' B='' N=''
+fi
+
+# ── output ───────────────────────────────────────────────────
+line() {  # line ICON COLOR TEXT [DETAIL]
+  printf '  %s %s%s\n' "$2$1$N" "$3" "${4:+  ${D}$4${N}}"
+  REPORT_LINES+=("$1 $3${4:+  ($4)}")
+}
+good() { line "✓" "$G" "$@"; }
+warn() { line "!" "$Y" "$@"; PROBLEMS=$((PROBLEMS + 1)); }
+bad()  { line "✗" "$R" "$@"; PROBLEMS=$((PROBLEMS + 1)); }
+note() { line "i" "$C" "$@"; }
+section() { printf '\n%s\n' "${B}$1${N}"; REPORT_LINES+=("" "[$1]"); }
+add_fix() { FIX_IDS+=("$1"); FIX_LABELS+=("$2"); }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+human() { awk -v k="$1" 'BEGIN{ if (k>=1048576) printf "%.1f GB", k/1048576; else if (k>=1024) printf "%.0f MB", k/1024; else printf "%d KB", k }'; }
+dir_kb() { [[ -e $1 ]] && du -sk "$1" 2>/dev/null | awk '{print $1}' || echo 0; }
+
+# ── checks ───────────────────────────────────────────────────
+check_app() {
+  local rel="${TERMUX_APK_RELEASE:-${TERMUX_APP__APK_RELEASE:-}}" ver="${TERMUX_VERSION:-${TERMUX_APP__APP_VERSION_NAME:-}}"
+  local android model
+  android="$(getprop ro.build.version.release 2>/dev/null)"
+  model="$(getprop ro.product.model 2>/dev/null)"
+  local where=""
+  case "$rel" in
+    GITHUB) where="GitHub build" ;; F_DROID) where="F-Droid build" ;; GOOGLE_PLAY_STORE) where="Play Store build" ;;
+  esac
+  if [[ $rel == GOOGLE_PLAY_STORE ]]; then
+    warn "Termux ${ver:-?} is the Play Store build" "it lags behind — install from GitHub or F-Droid"
+  elif [[ -n $ver ]]; then
+    good "Termux $ver${where:+ ($where)}" "${model:+$model · }${android:+Android $android}"
+  else
+    note "Couldn't read the Termux version" "${android:+Android $android}"
+  fi
+}
+
+check_storage() {
+  if [[ -r /storage/emulated/0 ]] && [[ -d $HOME/storage/shared || -d $HOME/storage/downloads ]]; then
+    good "Phone storage access"
+  else
+    bad "No access to phone storage" "Download folder, photos etc. are unreachable"
+    add_fix storage "Ask Android for storage access (tap Allow)"
+  fi
+}
+
+check_internet() {
+  local code
+  code="$(curl -s -m 6 -o /dev/null -w '%{http_code}' https://www.google.com/generate_204 2>/dev/null)"
+  [[ $code == 204 ]] || code="$(curl -s -m 6 -o /dev/null -w '%{http_code}' https://1.1.1.1/cdn-cgi/trace 2>/dev/null)"
+  if [[ $code == 204 || $code == 200 ]]; then good "Internet"; ONLINE=1
+  else bad "No internet" "skipping the mirror and update checks"; ONLINE=0; fi
+}
+
+current_mirror() {
+  local f
+  if [[ -f $PREFIX/etc/apt/sources.list.d/main.sources ]]; then
+    grep -m1 -E '^[[:space:]]*URIs:' "$PREFIX/etc/apt/sources.list.d/main.sources" | grep -oE 'https?://[^ ]+'
+  elif [[ -f $PREFIX/etc/apt/sources.list ]]; then
+    grep -m1 -E '^[[:space:]]*deb[[:space:]]+' "$PREFIX/etc/apt/sources.list" | grep -oE 'https?://[^ ]+'
+  fi
+}
+
+mirror_ok() { curl --head --fail -s --connect-timeout 5 -m 8 --location "${1%/}/dists/stable/Release" >/dev/null 2>&1; }
+
+check_mirror() {
+  local m; m="$(current_mirror)"
+  if [[ -z $m ]]; then
+    bad "No package mirror set"; add_fix mirror "Pick a working package mirror"; return
+  fi
+  local host="${m#*://}"; host="${host%%/*}"
+  if mirror_ok "$m"; then good "Package mirror" "$host"
+  else bad "Package mirror isn't answering" "$host"; add_fix mirror "Switch to a working package mirror"; fi
+}
+
+check_dpkg() {
+  have dpkg || return 0
+  local out; out="$(dpkg --audit 2>/dev/null)"
+  if [[ -n $out ]]; then
+    local n; n="$(grep -cE '^ [a-z0-9]' <<<"$out")"
+    bad "Half-installed packages${n:+ ($n)}" "an install got interrupted"
+    add_fix dpkg "Finish the interrupted package installs"
+  else
+    good "No broken packages"
+  fi
+}
+
+check_updates() {
+  have apt || return 0
+  local n; n="$(apt list --upgradable 2>/dev/null | grep -c 'upgradable from')"
+  if (( n > 0 )); then
+    warn "$n package updates waiting"
+    add_fix upgrade "Update all $n packages (keeps your config files)"
+  else
+    good "Packages up to date" "as of the last package list refresh"
+  fi
+}
+
+check_exec() {
+  if [[ ${LD_PRELOAD:-} == *termux-exec* ]]; then good "termux-exec (lets #!/usr/bin/env scripts run)"
+  elif have dpkg && dpkg -s termux-exec >/dev/null 2>&1; then
+    warn "termux-exec is installed but not active" "close Termux completely and reopen it"
+  else
+    bad "termux-exec is missing" "scripts starting with #!/usr/bin/env or #!/bin/bash will fail"
+    add_fix exec "Install termux-exec"
+  fi
+}
+
+# ~/bin problems are collected here, then fixed together
+B_NOEXEC=() B_CRLF=() B_SHEBANG=() B_LINKS=() B_MISSING=()
+
+interp_ok() {  # interp_ok PATH ARG — can this #! line actually run here?
+  local p="$1" a="$2"
+  if [[ $p == */env ]]; then [[ -n $a ]] && have "$a"; return; fi
+  [[ -x $p ]] && return 0
+  case "$p" in /bin/*|/usr/bin/*) [[ ${LD_PRELOAD:-} == *termux-exec* && -x $PREFIX/bin/${p##*/} ]] ;; *) return 1 ;; esac
+}
+
+check_bin() {
+  if [[ ! -d $BIN ]]; then note "No ~/bin folder yet"; return; fi
+  case ":$PATH:" in
+    *":$BIN:"*) ;;
+    *) bad "~/bin isn't on your PATH" "your tools only run with the full path"; add_fix path "Add ~/bin to PATH" ;;
+  esac
+  local f first interp arg n=0 tool
+  for f in "$BIN"/* "$BIN"/.[!.]*; do
+    [[ -e $f || -L $f ]] || continue
+    if [[ -L $f && ! -e $f ]]; then B_LINKS+=("$f"); continue; fi
+    [[ -f $f ]] || continue
+    n=$((n + 1))
+    first="$(head -c 4 -- "$f" 2>/dev/null | od -An -c | tr -d ' \n')"
+    [[ $first == '177ELF' ]] && { [[ -x $f ]] || B_NOEXEC+=("$f"); continue; }   # compiled program
+    [[ $first == '#!'* ]] || continue                                              # not a script — leave it
+    [[ -x $f ]] || B_NOEXEC+=("$f")
+    grep -q $'\r' -- "$f" && B_CRLF+=("$f")
+    read -r interp arg < <(head -n1 -- "$f" | tr -d '\r' | sed 's/^#![[:space:]]*//')
+    if ! interp_ok "$interp" "$arg"; then
+      tool="${interp##*/}"; [[ $tool == env ]] && tool="$arg"
+      if [[ -n $tool && -x $PREFIX/bin/$tool ]]; then B_SHEBANG+=("$f")
+      else B_MISSING+=("${f##*/} needs $tool"); fi
+    fi
+  done
+  local issues=$(( ${#B_NOEXEC[@]} + ${#B_CRLF[@]} + ${#B_SHEBANG[@]} + ${#B_LINKS[@]} ))
+  if (( issues == 0 && ${#B_MISSING[@]} == 0 )); then
+    good "~/bin tools ($n)" "all runnable"
+  else
+    local what=()
+    (( ${#B_NOEXEC[@]} ))  && what+=("${#B_NOEXEC[@]} not executable")
+    (( ${#B_CRLF[@]} ))    && what+=("${#B_CRLF[@]} with Windows line endings")
+    (( ${#B_SHEBANG[@]} )) && what+=("${#B_SHEBANG[@]} with a bad #! line")
+    (( ${#B_LINKS[@]} ))   && what+=("${#B_LINKS[@]} broken link$( (( ${#B_LINKS[@]} > 1 )) && echo s)")
+    if (( issues )); then
+      local summary="" names w
+      for w in "${what[@]}"; do summary+="${summary:+, }$w"; done
+      names="$(printf '%s\n' "${B_NOEXEC[@]##*/}" "${B_CRLF[@]##*/}" "${B_SHEBANG[@]##*/}" "${B_LINKS[@]##*/}" | sort -u | paste -sd' ')"
+      bad "~/bin tools: $summary" "$names"
+      add_fix bin "Repair the ~/bin tools (permissions, line endings, #! lines, dead links)"
+    fi
+    local mi; for mi in "${B_MISSING[@]}"; do warn "~/bin: $mi" "install it with pkg"; done
+  fi
+}
+
+check_rc() {
+  local rc out
+  for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+    [[ -f $rc ]] || continue
+    if [[ $rc == *zshrc ]]; then have zsh || continue; out="$(zsh -n "$rc" 2>&1)"
+    else out="$(bash -n "$rc" 2>&1)"; fi
+    if [[ -n $out ]]; then out="$(head -n1 <<<"$out")"; bad "${rc/#$HOME/\~} has a syntax error" "${out//$HOME/\~}"
+    else good "${rc/#$HOME/\~}"; fi
+  done
+}
+
+check_api() {
+  if ! have termux-battery-status; then
+    warn "termux-api package not installed" "notifications, Wi-Fi info and clipboard tools won't work"
+    add_fix api "Install the termux-api package"
+    return
+  fi
+  if timeout 8 termux-battery-status 2>/dev/null | grep -q '{'; then good "Termux:API app"
+  else warn "Termux:API app isn't answering" "install the Termux:API app from the same place you got Termux"; fi
+}
+
+check_space() {
+  local free apt_kb pip_kb npm_kb tmp_kb total
+  free="$(df -Pk "$HOME" 2>/dev/null | awk 'NR==2{print $4}')"
+  apt_kb="$(dir_kb "$PREFIX/var/cache/apt/archives")"
+  pip_kb="$(dir_kb "$HOME/.cache/pip")"
+  npm_kb="$(dir_kb "$HOME/.npm/_cacache")"
+  tmp_kb="$( [[ -d $PREFIX/tmp ]] && find "$PREFIX/tmp" -mindepth 1 -mtime +1 -print0 2>/dev/null | du -ck --files0-from=- 2>/dev/null | awk 'END{print $1+0}' || echo 0)"
+  total=$(( apt_kb + pip_kb + npm_kb + ${tmp_kb:-0} ))
+  if [[ -n $free ]]; then
+    if (( free < 307200 )); then bad "Only $(human "$free") free" "installs will start failing"
+    elif (( free < 1048576 )); then warn "$(human "$free") free" "getting low"
+    else good "$(human "$free") free"; fi
+  fi
+  if (( total > 51200 )); then
+    warn "$(human "$total") of caches you can clear" "package downloads, pip/npm caches, old temp files"
+    add_fix clean "Clear $(human "$total") of caches"
+  fi
+}
+
+check_python() {
+  have python || return 0
+  if ! python -c 'import ssl, sqlite3' >/dev/null 2>&1; then
+    bad "Python is broken" "can't load its own modules"; add_fix python "Reinstall Python"; return
+  fi
+  if have dpkg && dpkg -s python-pip >/dev/null 2>&1 && [[ -n "$(dpkg -V python-pip 2>/dev/null)" ]]; then
+    bad "pip was upgraded with pip" "Termux's pip must only be updated with pkg"
+    add_fix pip "Put Termux's own pip back"
+  fi
+  if have pip; then
+    local out; out="$(timeout 30 pip check 2>/dev/null)"
+    if [[ -n $out && $out != *"No broken requirements"* ]]; then
+      warn "Python packages with missing requirements" "$(head -n1 <<<"$out")"
+    else good "Python $(python -c 'import sys;print(".".join(map(str,sys.version_info[:2])))' 2>/dev/null) + pip"; fi
+  fi
+}
+
+check_background() {
+  if [[ -x $BIN/dropwatch ]]; then
+    if "$BIN/dropwatch" status 2>/dev/null | grep -q running; then good "dropwatch is watching Downloads"
+    else warn "dropwatch isn't running"; add_fix dropwatch "Start dropwatch"; fi
+  fi
+  if [[ -x $BIN/netkey && -f ${XDG_CONFIG_HOME:-$HOME/.config}/netkey/watch.on ]]; then
+    if "$BIN/netkey" watch status 2>/dev/null | grep -q 'watching every'; then good "netkey is watching your Wi-Fi"
+    else warn "netkey watch is on but not running"; add_fix netkey "Restart netkey's watcher"; fi
+  fi
+  local v; v="$(getprop ro.build.version.release 2>/dev/null)"; v="${v%%.*}"
+  if [[ $v =~ ^[0-9]+$ ]] && (( v >= 12 )) && [[ -x $BIN/dropwatch || -x $BIN/netkey ]]; then
+    note "If Termux ever dies with \"signal 9\": Developer options → Disable child process restrictions"
+  fi
+}
+
+check_git() {
+  have git || return 0
+  local n e
+  n="$(git config --global user.name 2>/dev/null)"; e="$(git config --global user.email 2>/dev/null)"
+  if [[ -n $n && -n $e ]]; then good "git identity" "$n"
+  else warn "git has no name/email set" "commits will fail — git config --global user.name / user.email"; fi
+}
+
+# ── fixes ────────────────────────────────────────────────────
+run() { printf '    %s\n' "${D}\$ $*${N}"; "$@"; }
+
+fix_storage() {
+  have termux-setup-storage || { echo "    termux-setup-storage not found"; return 1; }
+  termux-setup-storage; echo "    Tap Allow on the popup."; sleep 5
+  [[ -r /storage/emulated/0 ]]
+}
+
+fix_mirror() {
+  local cm="$PREFIX/etc/termux/chosen_mirrors" grp="$PREFIX/etc/termux/mirrors/$REGION"
+  if [[ -d $PREFIX/etc/termux/mirrors ]] && have pkg; then
+    rm -rf "$cm"
+    [[ -d $grp ]] && ln -s "$grp" "$cm"
+    yes | run pkg --check-mirror update
+  else  # older Termux: point straight at the official mirror
+    mkdir -p "$PREFIX/etc/apt"
+    printf 'deb https://packages-cf.termux.dev/apt/termux-main stable main\n' >"$PREFIX/etc/apt/sources.list"
+    have apt && run apt update
+  fi
+}
+
+fix_dpkg() {
+  run dpkg --configure -a
+  run apt-get -f install -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold
+}
+
+fix_upgrade() {
+  if have pkg; then run pkg upgrade -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold
+  else run apt-get upgrade -y; fi
+}
+
+fix_exec() { run pkg install -y termux-exec && echo "    Close Termux completely and reopen it to switch it on."; }
+
+fix_path() {
+  local rc
+  for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
+    [[ -f $rc || ( $rc == *bashrc && ! -f $HOME/.zshrc ) ]] || continue
+    grep -q '# tdoctor path' "$rc" 2>/dev/null || printf '\nexport PATH="$HOME/bin:$PATH"  # tdoctor path\n' >>"$rc"
+    echo "    added to ${rc/#$HOME/\~}"
+  done
+  export PATH="$BIN:$PATH"
+}
+
+fix_bin() {
+  local f
+  for f in "${B_NOEXEC[@]}"; do chmod 755 -- "$f" && echo "    made runnable: ${f##*/}"; done
+  for f in "${B_CRLF[@]}"; do sed -i 's/\r$//' -- "$f" && echo "    fixed line endings: ${f##*/}"; done
+  for f in "${B_SHEBANG[@]}"; do
+    if have termux-fix-shebang; then termux-fix-shebang "$f"
+    else  # same idea by hand: point the #! at Termux's copy
+      local i a; read -r i a < <(head -n1 -- "$f" | sed 's/^#![[:space:]]*//')
+      [[ ${i##*/} == env ]] && i="$a" a=""
+      sed -i "1s|.*|#!$PREFIX/bin/${i##*/}${a:+ $a}|" -- "$f"
+    fi
+    echo "    fixed #! line: ${f##*/}"
+  done
+  for f in "${B_LINKS[@]}"; do rm -f -- "$f" && echo "    removed dead link: ${f##*/}"; done
+}
+
+fix_api() { run pkg install -y termux-api || return 1; echo "    Also install the Termux:API app if you haven't."; }
+
+fix_clean() {
+  have apt && run apt-get clean
+  rm -f "$PREFIX"/var/cache/apt/archives/*.deb 2>/dev/null
+  [[ -d $HOME/.cache/pip ]] && run rm -rf "$HOME/.cache/pip"
+  have npm && [[ -d $HOME/.npm/_cacache ]] && run npm cache clean --force
+  [[ -d $PREFIX/tmp ]] && find "$PREFIX/tmp" -mindepth 1 -mtime +1 -delete 2>/dev/null
+  return 0
+}
+
+fix_python() { run pkg reinstall -y python; }
+fix_pip()    { run pkg reinstall -y python-pip; }
+fix_dropwatch() { run "$BIN/dropwatch" start; }
+fix_netkey()    { run "$BIN/netkey" watch resume; }
+
+# ── main ─────────────────────────────────────────────────────
+usage() {
+  cat <<EOF
+${B}tdoctor $VERSION${N} — checks your Termux setup and fixes what it can
+
+  tdoctor            check, then offer to fix
+  tdoctor --fix      check and fix everything without asking
+  tdoctor --quick    skip the network checks (mirror, updates)
+  tdoctor report     show the last report (to paste somewhere)
+EOF
+}
+
+for a in "$@"; do
+  case "$a" in
+    --fix|-y|fix) AUTO=1 ;;
+    --quick|-q)   QUICK=1 ;;
+    report)       if [[ -f $REPORT ]]; then cat "$REPORT"; else echo "No report yet — run tdoctor"; fi; exit 0 ;;
+    -h|--help|help) usage; exit 0 ;;
+    version|--version) echo "tdoctor $VERSION"; exit 0 ;;
+    *) echo "Unknown option: $a"; usage; exit 1 ;;
+  esac
+done
+
+printf '%s\n' "${B}tdoctor${N} ${D}— checking your Termux…${N}"
+
+section "Termux"
+check_app; check_storage; check_exec; check_api
+
+section "Packages"
+if (( QUICK )); then note "Skipped network checks (--quick)"
+else check_internet; (( ONLINE )) && { check_mirror; check_updates; }; fi
+check_dpkg; check_python
+
+section "Your tools"
+check_bin; check_rc; check_git; check_background
+
+section "Space"
+check_space
+
+mkdir -p "$DATA"
+{
+  printf 'tdoctor %s report — %(%Y-%m-%d %H:%M)T\n' "$VERSION" -1
+  printf '%s\n' "${REPORT_LINES[@]}"
+  printf '\nProblems: %d   Fixable: %d\n' "$PROBLEMS" "${#FIX_IDS[@]}"
+} >"$REPORT"
+
+echo
+if (( ${#FIX_IDS[@]} == 0 )); then
+  if (( PROBLEMS == 0 )); then echo "${G}${B}All good.${N}"
+  else echo "${Y}Nothing here tdoctor can fix by itself${N} — see the notes above."; fi
+  exit 0
+fi
+
+echo "${B}${#FIX_IDS[@]} thing(s) I can fix:${N}"
+for i in "${!FIX_LABELS[@]}"; do printf '  %d. %s\n' $((i + 1)) "${FIX_LABELS[$i]}"; done
+
+chosen=("${FIX_IDS[@]}")
+if (( ! AUTO )); then
+  if [[ ! -t 0 ]]; then echo; echo "Run ${B}tdoctor --fix${N} to fix them."; exit 1; fi
+  read -rp "Fix them all? [Y/n/p=pick] " ans
+  case "${ans,,}" in
+    n*) echo "Okay — nothing changed."; exit 1 ;;
+    p*) if have fzf; then
+          mapfile -t picked < <(printf '%s\n' "${FIX_LABELS[@]}" | fzf -m --height=50% --reverse --prompt "fix > " --header "Tab picks several · Enter = go")
+        else
+          read -rp "Numbers to fix (e.g. 1 3): " nums; picked=()
+          for n in $nums; do [[ $n =~ ^[0-9]+$ ]] && (( n >= 1 && n <= ${#FIX_LABELS[@]} )) && picked+=("${FIX_LABELS[$((n - 1))]}"); done
+        fi
+        chosen=()
+        for p in "${picked[@]}"; do
+          for i in "${!FIX_LABELS[@]}"; do [[ ${FIX_LABELS[$i]} == "$p" ]] && chosen+=("${FIX_IDS[$i]}"); done
+        done ;;
+  esac
+fi
+
+# mirror first, then package repairs, then updates — order matters
+order=(storage mirror dpkg exec api python pip upgrade path bin clean dropwatch netkey)
+done_n=0 fail_n=0
+for id in "${order[@]}"; do
+  [[ " ${chosen[*]} " == *" $id "* ]] || continue
+  for i in "${!FIX_IDS[@]}"; do [[ ${FIX_IDS[$i]} == "$id" ]] && label="${FIX_LABELS[$i]}"; done
+  echo; echo "${C}→${N} $label"
+  if "fix_$id"; then done_n=$((done_n + 1)); echo "  ${G}✓ done${N}"
+  else fail_n=$((fail_n + 1)); echo "  ${R}✗ didn't fully work${N} — the output above says why"; fi
+done
+
+echo
+echo "${B}Fixed $done_n${N}$( (( fail_n )) && echo ", ${R}$fail_n failed${N}"). Run ${B}tdoctor${N} again to double-check."
+printf '\nFixes run: %s   ok: %d   failed: %d\n' "${chosen[*]}" "$done_n" "$fail_n" >>"$REPORT"

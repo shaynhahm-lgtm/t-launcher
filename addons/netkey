@@ -1,0 +1,569 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────
+#  netkey — see what's on your Wi-Fi, from Termux
+#
+#  netkey            menu: scan, name devices, figure out what
+#                    a device is, your connection, speed test,
+#                    watch for new devices
+#  netkey help       every command
+#
+#  Only scans the network your phone is connected to.
+# ─────────────────────────────────────────────────────────────
+set -u
+shopt -u patsub_replacement 2>/dev/null || true
+VERSION="1.0"
+
+CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/netkey"
+NAMES="$CONF_DIR/names"        # key|name
+SEEN="$CONF_DIR/seen"          # key|first|last|ip|host|mac|vendor|ports|kind
+LAST="$CONF_DIR/last-scan"     # ip|key   (most recent scan)
+WATCH_PID="$CONF_DIR/watch.pid"
+WATCH_ON="$CONF_DIR/watch.on"  # exists while watching is switched on (holds minutes)
+WATCH_LOG="$CONF_DIR/watch.log"
+ARP_FILE="${NETKEY_ARP:-/proc/net/arp}"
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+# ports that tell devices apart (also used to find devices that ignore ping)
+PORTS="21,22,23,53,80,139,443,445,515,554,631,1883,3389,5000,7000,8008,8009,8080,8443,8883,9100,62078"
+QUIET=0
+
+declare -A NAME=() S_FIRST=() S_LAST=() S_IP=() S_HOST=() S_MAC=() S_VENDOR=() S_PORTS=() S_KIND=()
+NEW_NOW=()
+
+if [[ -t 1 ]]; then
+  G=$'\e[32m' Y=$'\e[33m' R=$'\e[31m' C=$'\e[36m' D=$'\e[2m' B=$'\e[1m' N=$'\e[0m'
+else
+  G='' Y='' R='' C='' D='' B='' N=''
+fi
+
+# ── basics ───────────────────────────────────────────────────
+say()     { (( QUIET )) || printf '%s\n' "$*"; }
+err()     { printf '%s\n' "${R}✗${N} $*" >&2; }
+ok()      { say "${G}✓${N} $*"; }
+now()     { printf '%s' "${EPOCHSECONDS:-$(date +%s)}"; }
+pause()   { [[ -t 0 ]] && { read -rsn1 -p "${D}press any key${N}" _; echo; }; }
+confirm() { local a; read -rp "$1 [y/N] " a; [[ $a == [yY]* ]]; }
+
+ago() {
+  local s=$(( $(now) - $1 ))
+  if (( s < 90 )); then echo "just now"
+  elif (( s < 5400 )); then echo "$(( s / 60 ))m ago"
+  elif (( s < 172800 )); then echo "$(( s / 3600 ))h ago"
+  else echo "$(( s / 86400 ))d ago"; fi
+}
+
+need() {  # installs anything missing, automatically
+  local c missing=()
+  for c in "$@"; do command -v "$c" >/dev/null 2>&1 || missing+=("$c"); done
+  (( ${#missing[@]} )) || return 0
+  if command -v pkg >/dev/null 2>&1; then
+    printf '%s\n' "${D}Installing ${missing[*]}…${N}" >&2
+    pkg install -y "${missing[@]}" >/dev/null 2>&1
+  fi
+  for c in "${missing[@]}"; do
+    command -v "$c" >/dev/null 2>&1 || { err "netkey needs $c — run: pkg install $c"; exit 1; }
+  done
+}
+
+notify() {
+  command -v termux-notification >/dev/null 2>&1 || return 0
+  timeout 10 termux-notification --group netkey --id "netkey-$RANDOM" --title "netkey" --content "$1" \
+    >/dev/null 2>&1 </dev/null &
+}
+
+# ── where am I ───────────────────────────────────────────────
+WIFI_JSON=""
+wifi_json() {
+  [[ -n $WIFI_JSON ]] && return 0
+  if [[ -n ${NETKEY_WIFI_JSON:-} ]]; then WIFI_JSON="$NETKEY_WIFI_JSON"; return 0; fi
+  command -v termux-wifi-connectioninfo >/dev/null 2>&1 || return 1
+  WIFI_JSON="$(timeout 6 termux-wifi-connectioninfo 2>/dev/null)"
+  [[ -n $WIFI_JSON ]]
+}
+wfield() {  # wfield KEY — one value from termux-wifi-connectioninfo
+  wifi_json || return 0
+  sed -n 's/.*"'"$1"'": *"\{0,1\}\([^",}]*\)"\{0,1\}.*/\1/p' <<<"$WIFI_JSON" | head -n1
+}
+
+MYIP=""
+init_net() {  # look things up once, in the main shell, so every subshell reuses them
+  WIFI_JSON=""; MYIP=""; GW_CACHE=""
+  wifi_json || true
+  MYIP="$(my_ip)"
+  GW_CACHE="$(gateway)"
+}
+
+my_ip() {
+  [[ -n $MYIP ]] && { printf '%s' "$MYIP"; return; }
+  local ip="${NETKEY_IP:-}"
+  [[ -z $ip ]] && ip="$(wfield ip)"
+  [[ -z $ip || $ip == 0.0.0.0 ]] && ip="$(ifconfig 2>/dev/null | awk '/^wlan0/{f=1} f&&/inet /{print $2; exit}')"
+  [[ -z $ip ]] && ip="$(ip -4 addr show wlan0 2>/dev/null | awk '/inet /{sub(/\/.*/,"",$2); print $2; exit}')"
+  printf '%s' "$ip"
+}
+
+GW_CACHE=""
+gateway() {
+  [[ -n $GW_CACHE ]] && { printf '%s' "$GW_CACHE"; return; }
+  local g="${NETKEY_GATEWAY:-}"
+  [[ -z $g ]] && g="$(ip route show default 2>/dev/null | awk '/default via/{print $3; exit}')"
+  [[ -z $g ]] && g="$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="via"){print $(i+1); exit}}')"
+  if [[ -z $g ]]; then  # Android often hides the route table; the router is nearly always .1
+    local me; me="$(my_ip)"; [[ $me =~ ^([0-9]+\.[0-9]+\.[0-9]+)\. ]] && g="${BASH_REMATCH[1]}.1"
+  fi
+  GW_CACHE="$g"; printf '%s' "$g"
+}
+
+# ── device identity ──────────────────────────────────────────
+mac_table() {  # ip|mac — only works where Android lets Termux read the neighbor table
+  {
+    [[ -r $ARP_FILE ]] && awk 'NR>1 && $4 ~ /:/ && $4 != "00:00:00:00:00:00" {print $1"|"tolower($4)}' "$ARP_FILE"
+    ip neigh show 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="lladdr") print $1"|"tolower($(i+1))}'
+  } 2>/dev/null | sort -u -t'|' -k1,1
+}
+
+MAC_DB=""
+find_mac_db() {
+  local d
+  for d in "${PREFIX:-/usr}/share/nmap" /usr/share/nmap /usr/local/share/nmap; do
+    [[ -f $d/nmap-mac-prefixes ]] && { MAC_DB="$d/nmap-mac-prefixes"; return; }
+  done
+}
+
+vendor_of() {
+  local mac="$1" p
+  [[ -n $mac ]] || return 0
+  if [[ ${mac:1:1} == [26aeAE] ]]; then printf 'private MAC'; return; fi   # randomized (phones/laptops)
+  [[ -n $MAC_DB ]] || return 0
+  p="${mac//:/}"; p="${p:0:6}"; p="${p^^}"
+  grep -m1 "^$p " "$MAC_DB" | cut -d' ' -f2-
+}
+
+guess_kind() {  # guess_kind IP "22,80" → what it probably is
+  local ip="$1" p=",$2,"
+  if [[ $p == *,80,* ]] && [[ "$(curl -s -m 2 "http://$ip/ping" 2>/dev/null)" == launcher-pong ]]; then
+    echo "Cardputer (Launcher WebUI)"; return
+  fi
+  case "$p" in
+    ,-,|,,)           echo "No open ports (phone, laptop or locked-down)" ;;
+    *,62078,*)        echo "iPhone / iPad" ;;
+    *,8008,*|*,8009,*) echo "Chromecast / Google speaker" ;;
+    *,9100,*|*,631,*|*,515,*) echo "Printer" ;;
+    *,554,*)          echo "Camera / video device" ;;
+    *,1883,*|*,8883,*) echo "Smart-home hub" ;;
+    *,3389,*|*,445,*|*,139,*) echo "Windows PC / file share" ;;
+    *,7000,*)         echo "Apple TV / AirPlay" ;;
+    *,53,*)           echo "Router / network box" ;;
+    *,22,*)           echo "Linux box (SSH)" ;;
+    *,80,*|*,443,*|*,8080,*|*,8443,*) echo "Has a web page (router, camera, gadget…)" ;;
+    *)                echo "" ;;
+  esac
+}
+
+# ── memory ───────────────────────────────────────────────────
+load_db() {
+  mkdir -p "$CONF_DIR"; touch "$NAMES" "$SEEN"
+  NAME=(); S_FIRST=(); S_LAST=(); S_IP=(); S_HOST=(); S_MAC=(); S_VENDOR=(); S_PORTS=(); S_KIND=()
+  local k v f l ip h m ven p kind
+  while IFS='|' read -r k v; do [[ -n $k ]] && NAME[$k]="$v"; done <"$NAMES"
+  while IFS='|' read -r k f l ip h m ven p kind; do
+    [[ -n $k ]] || continue
+    S_FIRST[$k]="$f"; S_LAST[$k]="$l"; S_IP[$k]="$ip"; S_HOST[$k]="$h"
+    S_MAC[$k]="$m"; S_VENDOR[$k]="$ven"; S_PORTS[$k]="$p"; S_KIND[$k]="$kind"
+  done <"$SEEN"
+}
+
+save_db() {
+  local k
+  for k in "${!S_FIRST[@]}"; do
+    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$k" "${S_FIRST[$k]:-0}" "${S_LAST[$k]:-0}" "${S_IP[$k]:-}" \
+      "${S_HOST[$k]:-}" "${S_MAC[$k]:-}" "${S_VENDOR[$k]:-}" "${S_PORTS[$k]:-}" "${S_KIND[$k]:-}"
+  done | sort >"$SEEN.tmp" && mv -f "$SEEN.tmp" "$SEEN"
+  for k in "${!NAME[@]}"; do printf '%s|%s\n' "$k" "${NAME[$k]:-}"; done | sort >"$NAMES.tmp" && mv -f "$NAMES.tmp" "$NAMES"
+}
+
+key_for_ip() {  # newest record that had this IP
+  local k best="" bl=0
+  for k in "${!S_IP[@]}"; do
+    [[ ${S_IP[$k]} == "$1" ]] && (( ${S_LAST[$k]:-0} >= bl )) && { best="$k"; bl="${S_LAST[$k]:-0}"; }
+  done
+  printf '%s' "$best"
+}
+
+is_new() {  # seen for the first time in the last day, and not named yet
+  local f="${S_FIRST[$1]:-0}"
+  (( f > 0 && $(now) - f < 86400 )) && [[ -z ${NAME[$1]:-} ]]
+}
+
+label_of() {
+  local k="$1"
+  if [[ -n ${NAME[$k]:-} ]]; then printf '%s' "${NAME[$k]}"
+  elif [[ -n ${S_HOST[$k]:-} ]]; then printf '%s' "${S_HOST[$k]}"
+  else printf 'unknown device'; fi
+}
+
+info_of() {  # short description line for a device
+  local k="$1" ip="${S_IP[$1]:-}" parts=()
+  [[ $ip == "$(my_ip)" ]] && parts+=("this phone")
+  [[ $ip == "$(gateway)" ]] && parts+=("router")
+  [[ -n ${S_KIND[$k]:-} ]] && parts+=("${S_KIND[$k]}")
+  [[ -n ${S_VENDOR[$k]:-} ]] && parts+=("${S_VENDOR[$k]}")
+  local out="" part
+  for part in "${parts[@]}"; do out+="${out:+ · }$part"; done
+  printf '%s' "$out"
+}
+
+# ── scanning ─────────────────────────────────────────────────
+subnet() {
+  if [[ -n ${NETKEY_SUBNET:-} ]]; then printf '%s' "$NETKEY_SUBNET"; return; fi
+  local me; me="$(my_ip)"
+  [[ $me =~ ^([0-9]+\.[0-9]+\.[0-9]+)\.[0-9]+$ ]] || return 1
+  printf '%s.0/24' "${BASH_REMATCH[1]}"
+}
+
+nmap_up() {  # nmap_up NET → ip|hostname for each live device
+  local dns=(--system-dns) gw; gw="$(gateway)"
+  [[ -n $gw ]] && dns=(--dns-servers "$gw")
+  nmap -sn --unprivileged -T4 --max-retries 1 -PS"$PORTS" "${dns[@]}" -oG - "$1" 2>/dev/null |
+    awk '/Status: Up/{h=$3; gsub(/[()]/,"",h); print $2"|"h}'
+}
+
+nmap_ports() {  # nmap_ports IP… → ip|22,80|22 ssh, 80 http
+  nmap -sT --unprivileged -T4 --max-retries 1 -n -p "$PORTS" --open -oG - "$@" 2>/dev/null |
+    awk '/Ports:/{
+      ip=$2; s=$0; sub(/.*Ports: /,"",s); sub(/\t.*/,"",s)
+      n=split(s,a,", "); nums=""; desc=""
+      for(i=1;i<=n;i++){ split(a[i],b,"/"); if(b[2]=="open"){ nums=nums (nums?",":"") b[1]; desc=desc (desc?", ":"") b[1] (b[5]?" "b[5]:"") } }
+      print ip"|"nums"|"desc }'
+}
+
+scan() {  # scan [deep] — finds devices, updates memory, writes LAST, fills NEW_NOW
+  need nmap
+  load_db
+  local deep="${1:-}" net me t first_run=0
+  net="$(subnet)" || { err "Couldn't get this phone's Wi-Fi address — are you on Wi-Fi?"; return 1; }
+  me="$(my_ip)"
+  [[ -s $SEEN ]] || first_run=1
+  say "${D}Scanning $net${deep:+ and checking what each device is} — usually 20–60 seconds…${N}"
+  local up; up="$(nmap_up "$net")"
+  [[ -n $up ]] || { err "Nothing answered on $net."; return 1; }
+
+  declare -A MAC=() PORT=()
+  local ip m p h desc
+  while IFS='|' read -r ip m; do [[ -n $ip ]] && MAC[$ip]="$m"; done < <(mac_table)
+  if [[ -n $deep ]]; then
+    # shellcheck disable=SC2046
+    while IFS='|' read -r ip p desc; do [[ -n $ip ]] && PORT[$ip]="$p"; done < <(nmap_ports $(cut -d'|' -f1 <<<"$up"))
+  fi
+  find_mac_db
+  t="$(now)"
+  NEW_NOW=()
+
+  local key mac
+  : >"$LAST.tmp"
+  while IFS='|' read -r ip h; do
+    [[ -n $ip ]] || continue
+    mac="${MAC[$ip]:-}"
+    if [[ -n $mac ]]; then key="mac:$mac"
+    elif [[ -n $h ]]; then key="host:${h,,}"
+    else key="ip:$ip"; fi
+    if [[ -z ${S_FIRST[$key]+x} ]]; then
+      if (( first_run )); then S_FIRST[$key]=0; else S_FIRST[$key]="$t"; NEW_NOW+=("$key"); fi
+    fi
+    S_LAST[$key]="$t"; S_IP[$key]="$ip"; S_HOST[$key]="$h"; S_MAC[$key]="$mac"
+    S_VENDOR[$key]="$(vendor_of "$mac")"
+    if [[ -n $deep ]]; then
+      S_PORTS[$key]="${PORT[$ip]:--}"
+      S_KIND[$key]="$(guess_kind "$ip" "${S_PORTS[$key]}")"
+    fi
+    if [[ ${S_VENDOR[$key]} == *Espressif* && ( -z ${S_KIND[$key]:-} || ${S_KIND[$key]:-} == "No open ports"* ) ]]; then
+      S_KIND[$key]="ESP32 gadget (Cardputer, smart plug…)"
+    fi
+    printf '%s|%s\n' "$ip" "$key" >>"$LAST.tmp"
+  done <<<"$up"
+  sort -t. -k1,1n -k2,2n -k3,3n -k4,4n "$LAST.tmp" >"$LAST"; rm -f "$LAST.tmp"
+  save_db
+  (( first_run )) && say "${D}First scan — saved these as your normal devices. New ones get flagged from now on.${N}"
+  return 0
+}
+
+scan_rows() {  # one display line per device in the last scan: ip|key<TAB>text
+  local ip key mark label info
+  while IFS='|' read -r ip key; do
+    [[ -n $ip ]] || continue
+    if is_new "$key"; then mark="${Y}★ NEW${N} "; else mark=""; fi
+    label="$(label_of "$key")"; info="$(info_of "$key")"
+    printf '%s|%s\t%s%-15s %s%s\n' "$ip" "$key" "$mark" "$ip" "${B}$label${N}" "${info:+  ${D}$info${N}}"
+  done <"$LAST"
+}
+
+print_scan() {
+  load_db
+  local total new=0 k
+  total="$(grep -c . "$LAST" 2>/dev/null)"; total="${total:-0}"
+  while IFS='|' read -r _ k; do is_new "$k" && new=$((new + 1)); done <"$LAST"
+  scan_rows | cut -f2-
+  say ""
+  say "${B}$total devices${N}$( (( new )) && echo " · ${Y}$new new${N}")  ${D}— name one: netkey name IP NAME${N}"
+}
+
+check_device() {  # open ports + best guess for one IP
+  need nmap
+  local ip="$1" line p desc key
+  say "${D}Checking $ip…${N}"
+  line="$(nmap_ports "$ip")"
+  IFS='|' read -r _ p desc <<<"$line"
+  load_db; find_mac_db
+  key="$(key_for_ip "$ip")"
+  [[ -z $key ]] && { key="ip:$ip"; S_FIRST[$key]="$(now)"; S_IP[$key]="$ip"; S_LAST[$key]="$(now)"; }
+  S_PORTS[$key]="${p:--}"; S_KIND[$key]="$(guess_kind "$ip" "${p:--}")"
+  save_db
+  say "${B}$(label_of "$key")${N}  $ip"
+  say "  Open ports: ${desc:-none}"
+  say "  Probably:   ${S_KIND[$key]:-unclear}"
+  [[ -n ${S_VENDOR[$key]:-} ]] && say "  Maker:      ${S_VENDOR[$key]}"
+  return 0
+}
+
+name_device() {  # name_device IP|KEY NAME
+  load_db
+  local key="$1" name="${2//|/}"
+  [[ $key == *:* && -n ${S_FIRST[$key]+x} ]] || key="$(key_for_ip "$1")"
+  [[ -n $key ]] || { err "No device seen at $1 — scan first."; return 1; }
+  if [[ -n $name ]]; then NAME[$key]="$name"; else unset 'NAME[$key]'; fi
+  save_db
+  ok "${S_IP[$key]:-$1} is now called ${B}${name:-(no name)}${N}"
+}
+
+forget_device() {
+  load_db
+  unset 'S_FIRST[$1]' 'S_LAST[$1]' 'S_IP[$1]' 'S_HOST[$1]' 'S_MAC[$1]' 'S_VENDOR[$1]' 'S_PORTS[$1]' 'S_KIND[$1]' 'NAME[$1]'
+  save_db
+}
+
+known_rows() {  # every device ever seen, newest first: key<TAB>text
+  load_db
+  local k
+  for k in "${!S_FIRST[@]}"; do
+    local f="${S_FIRST[$k]}" since
+    if (( f == 0 )); then since="from the first scan"; else since="first seen $(ago "$f")"; fi
+    printf '%s\t%s\t%s%-15s %s  %s\n' "${S_LAST[$k]}" "$k" "$(is_new "$k" && echo "${Y}★ NEW${N} ")" \
+      "${S_IP[$k]}" "${B}$(label_of "$k")${N}" "${D}last seen $(ago "${S_LAST[$k]}") · $since${N}"
+  done | sort -t $'\t' -k1,1nr | cut -f2-
+}
+
+# ── connection ───────────────────────────────────────────────
+net_info() {
+  local ssid rssi freq speed band sig pub
+  ssid="$(wfield ssid)"; rssi="$(wfield rssi)"; freq="$(wfield frequency_mhz)"; speed="$(wfield link_speed_mbps)"
+  [[ $ssid == *unknown* ]] && ssid="(hidden — allow Location for Termux:API to see it)"
+  if [[ $freq =~ ^[0-9]+$ ]]; then
+    if (( freq < 3000 )); then band="2.4 GHz"; elif (( freq < 5925 )); then band="5 GHz"; else band="6 GHz"; fi
+  fi
+  if [[ $rssi =~ ^-?[0-9]+$ ]]; then
+    if (( rssi >= -60 )); then sig="${G}strong${N}"; elif (( rssi >= -70 )); then sig="${Y}ok${N}"; else sig="${R}weak${N}"; fi
+  fi
+  pub="$(curl -s -m 5 https://api.ipify.org 2>/dev/null)"
+  say "${B}Your connection${N}"
+  say "  Wi-Fi       ${ssid:-?}"
+  [[ -n ${band:-} ]] && say "  Band        $band${speed:+ · link $speed Mbps}"
+  [[ -n ${sig:-} ]]  && say "  Signal      $sig ($rssi dBm)"
+  say "  This phone  $(my_ip)"
+  say "  Router      $(gateway)"
+  say "  Public IP   ${pub:-offline?}"
+  [[ ${band:-} == "5 GHz" || ${band:-} == "6 GHz" ]] && say "  ${D}(the Cardputer can only join 2.4 GHz networks)${N}"
+  if [[ -z $WIFI_JSON ]]; then
+    say "  ${D}Install Termux:API + pkg install termux-api for Wi-Fi name, band and signal.${N}"
+  fi
+  return 0
+}
+
+speed_test() {
+  need curl
+  local pingavg down up
+  say "${D}Testing — about 30 seconds…${N}"
+  pingavg="$(ping -c 4 -W 2 1.1.1.1 2>/dev/null | awk -F/ '/min\/avg/{print $5}')"
+  say "  Ping       ${pingavg:+${pingavg%.*} ms}${pingavg:-no reply}"
+  down="$(curl -s -o /dev/null -m 12 -w '%{speed_download}' 'https://speed.cloudflare.com/__down?bytes=50000000' 2>/dev/null || true)"
+  if awk -v b="${down:-0}" 'BEGIN{exit !(b>0)}'; then
+    say "  Download   $(awk -v b="$down" 'BEGIN{printf "%.1f Mbps", b*8/1000000}')"
+  else
+    say "  Download   ${R}couldn't reach the test server${N}"; return 1
+  fi
+  up="$(head -c 15000000 /dev/zero | curl -s -o /dev/null -m 12 -w '%{speed_upload}' --data-binary @- \
+        https://speed.cloudflare.com/__up 2>/dev/null || true)"
+  say "  Upload     $(awk -v b="${up:-0}" 'BEGIN{printf "%.1f Mbps", b*8/1000000}')"
+}
+
+# ── watching ─────────────────────────────────────────────────
+watch_running() { [[ -f $WATCH_PID ]] && kill -0 "$(<"$WATCH_PID")" 2>/dev/null; }
+
+watch_loop() {
+  local min="${1:-15}" k
+  echo $$ >"$WATCH_PID"
+  QUIET=1
+  printf '%(%m-%d %H:%M)T  watching every %s min (pid %s)\n' -1 "$min" "$$"
+  while [[ -f $WATCH_ON && "$(<"$WATCH_PID")" == "$$" ]]; do
+    init_net
+    if scan >/dev/null 2>&1; then
+      for k in "${NEW_NOW[@]}"; do
+        printf '%(%m-%d %H:%M)T  NEW %s %s %s\n' -1 "${S_IP[$k]}" "$k" "${S_VENDOR[$k]}"
+        notify "New device on your Wi-Fi: ${S_IP[$k]}${S_HOST[$k]:+ (${S_HOST[$k]})}${S_VENDOR[$k]:+ · ${S_VENDOR[$k]}}"
+      done
+    else
+      printf '%(%m-%d %H:%M)T  scan failed (off Wi-Fi?)\n' -1
+    fi
+    sleep $(( min * 60 ))
+  done
+}
+
+watch_cmd() {
+  local action="${1:-status}" min="${2:-15}" rc
+  case "$action" in
+    start)
+      [[ $min =~ ^[0-9]+$ ]] && (( min >= 1 )) || { err "Minutes must be a number"; return 1; }
+      need nmap; mkdir -p "$CONF_DIR"
+      echo "$min" >"$WATCH_ON"
+      watch_running && { kill "$(<"$WATCH_PID")" 2>/dev/null; sleep 0.3; }
+      nohup bash "$SELF" _watch "$min" >>"$WATCH_LOG" 2>&1 </dev/null &
+      echo $! >"$WATCH_PID"; disown 2>/dev/null || true
+      for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do      # pick back up whenever Termux opens
+        [[ -f $rc ]] || continue
+        grep -q '# netkey watch' "$rc" ||
+          printf '\n# netkey watch\n[ -x "$HOME/bin/netkey" ] && "$HOME/bin/netkey" watch resume\n' >>"$rc"
+      done
+      ok "Watching for new devices every $min min — you'll get a notification." ;;
+    resume)
+      [[ -f $WATCH_ON ]] && ! watch_running && watch_cmd start "$(<"$WATCH_ON")" >/dev/null ;;
+    stop)
+      rm -f "$WATCH_ON"
+      watch_running && kill "$(<"$WATCH_PID")" 2>/dev/null
+      rm -f "$WATCH_PID"; ok "Stopped watching." ;;
+    status)
+      if watch_running; then say "${G}●${N} watching every $(<"$WATCH_ON") min"; else say "${D}○ not watching${N}"; fi
+      [[ -s $WATCH_LOG ]] && { say "${B}Recent:${N}"; tail -n 6 "$WATCH_LOG" | sed 's/^/  /'; }
+      return 0 ;;
+    *) err "watch start [MIN] | stop | status"; return 1 ;;
+  esac
+}
+
+# ── menus (fzf) ──────────────────────────────────────────────
+FZF_BASE=(--height=85% --reverse --no-sort --border=rounded --info=hidden --ansi)
+
+device_menu() {  # device_menu KEY
+  local key="$1" ip c new
+  while :; do
+    load_db
+    ip="${S_IP[$key]:-}"
+    [[ -n $ip ]] || return 0
+    c="$(printf '%s\n' "🏷  Name it" "🔍 What is it? (check open ports)" "📶 Ping it" \
+          "🌐 Open in browser" "🔐 SSH to it" "📋 Copy IP" "🗑  Forget it" |
+         fzf "${FZF_BASE[@]}" --prompt "$ip > " --header "$(label_of "$key") · $ip  $(info_of "$key")")" || return 0
+    case "$c" in
+      *Name*)    read -rp "Name for $ip: " new; [[ -n $new ]] && name_device "$key" "$new"; pause ;;
+      *What*)    check_device "$ip"; pause ;;
+      *Ping*)    ping -c 4 -W 2 "$ip"; pause ;;
+      *browser*) if command -v termux-open-url >/dev/null 2>&1; then termux-open-url "http://$ip"; else say "http://$ip"; pause; fi ;;
+      *SSH*)     read -rp "User [root]: " new; ssh "${new:-root}@$ip"; pause ;;
+      *Copy*)    if command -v termux-clipboard-set >/dev/null 2>&1; then printf '%s' "$ip" | termux-clipboard-set; ok "Copied $ip"
+                 else say "$ip"; fi; pause ;;
+      *Forget*)  confirm "Forget $(label_of "$key")?" && { forget_device "$key"; ok "Forgotten"; pause; return 0; } ;;
+    esac
+  done
+}
+
+scan_menu() {  # scan_menu [deep]
+  scan "${1:-}" || { pause; return; }
+  local sel new=0 total k
+  while :; do
+    load_db
+    total="$(grep -c . "$LAST" 2>/dev/null)"; total="${total:-0}"; new=0
+    while IFS='|' read -r _ k; do is_new "$k" && new=$((new + 1)); done <"$LAST"
+    sel="$(scan_rows | fzf "${FZF_BASE[@]}" --delimiter=$'\t' --with-nth=2 --prompt "devices > " \
+             --header "$total devices$( (( new )) && echo " · $new new") · Enter = details · Esc = back")" || return 0
+    k="${sel%%$'\t'*}"; device_menu "${k#*|}"
+  done
+}
+
+known_menu() {
+  local sel
+  while :; do
+    sel="$(known_rows | fzf "${FZF_BASE[@]}" --delimiter=$'\t' --with-nth=2 --prompt "seen > " \
+             --header "Every device netkey has seen · Enter = details")" || return 0
+    device_menu "${sel%%$'\t'*}"
+  done
+}
+
+main_menu() {
+  need fzf nmap curl
+  local c header watch_label ssid
+  while :; do
+    ssid="$(wfield ssid)"; [[ $ssid == *unknown* ]] && ssid=""
+    header="Wi-Fi: ${ssid:-?} · this phone $(my_ip)"
+    if watch_running; then watch_label="👀 Watching for new devices: ON (tap to stop)"
+    else watch_label="👀 Watch for new devices: off (tap to start)"; fi
+    c="$(printf '%s\n' \
+          "📡 Scan my Wi-Fi" \
+          "🔬 Scan + figure out what each device is (slower)" \
+          "🏷  Devices I've seen" \
+          "🎯 Check one address" \
+          "📶 My connection" \
+          "🚀 Speed test" \
+          "$watch_label" |
+         fzf "${FZF_BASE[@]}" --prompt "netkey > " --header "$header")" || return 0
+    case "$c" in
+      *"Scan my"*)  scan_menu ;;
+      *"Scan +"*)   scan_menu deep ;;
+      *seen*)       known_menu ;;
+      *address*)    local ip; read -rp "IP address: " ip; [[ -n $ip ]] && check_device "$ip"; pause ;;
+      *connection*) net_info; pause ;;
+      *Speed*)      speed_test; pause ;;
+      *ON*)         watch_cmd stop; pause ;;
+      *off*)        local m; read -rp "Check every how many minutes? [15]: " m; watch_cmd start "${m:-15}"; pause ;;
+    esac
+  done
+}
+
+usage() {
+  cat <<EOF
+${B}netkey $VERSION${N} — see what's on your Wi-Fi
+
+  netkey                    menu
+  netkey scan [--deep]      list devices (--deep also figures out what each one is)
+  netkey devices            every device it has ever seen
+  netkey name IP NAME       give a device a name (blank NAME clears it)
+  netkey what IP            open ports + what it probably is
+  netkey info               your Wi-Fi, band, signal, router, public IP
+  netkey speed              quick speed test
+  netkey watch start [MIN]  notify me when a new device joins (default every 15 min)
+  netkey watch stop | status
+
+Only scans the network this phone is on. Uses nmap without root, so a few
+locked-down devices may not show up.
+EOF
+}
+
+# ── main ─────────────────────────────────────────────────────
+args=()
+for a in "$@"; do case "$a" in -q|--quiet) QUIET=1 ;; *) args+=("$a") ;; esac; done
+set -- "${args[@]}"
+cmd="${1:-menu}"; shift || true
+case "$cmd" in help|-h|--help|version|--version|_watch|setup) ;; *) init_net ;; esac
+
+case "$cmd" in
+  menu)          main_menu ;;
+  scan)          deep=""; for a in "$@"; do case "$a" in -d|--deep) deep=1 ;; */*) NETKEY_SUBNET="$a" ;; esac; done
+                 scan "$deep" && print_scan ;;
+  devices|seen)  rows="$(known_rows)"; [[ -n $rows ]] && cut -f2- <<<"$rows" || say "Nothing yet — run: netkey scan" ;;
+  name)          [[ -n ${1:-} ]] || { usage; exit 1; }; ip="$1"; shift; name_device "$ip" "$*" ;;
+  what|ports)    [[ -n ${1:-} ]] || { usage; exit 1; }; check_device "$1" ;;
+  info|me)       net_info ;;
+  speed)         speed_test ;;
+  watch)         watch_cmd "$@" ;;
+  _watch)        watch_loop "$@" ;;
+  setup)         mkdir -p "$HOME/bin"; dest="$HOME/bin/netkey"
+                 [[ $SELF != "$(readlink -f "$dest" 2>/dev/null)" ]] && cp -f -- "$SELF" "$dest"
+                 sed -i 's/\r$//' "$dest"; chmod 755 "$dest"; need nmap fzf curl; ok "Installed: netkey" ;;
+  help|-h|--help) usage ;;
+  version|--version) echo "netkey $VERSION" ;;
+  *)             err "Unknown command: $cmd"; usage; exit 1 ;;
+esac

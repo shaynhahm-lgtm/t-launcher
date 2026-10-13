@@ -1,0 +1,542 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────
+#  dropwatch — watches your Download folder and handles new
+#  files automatically, by type:
+#
+#    scripts (.sh .bash .py, or anything starting with #!)
+#                 → installed to ~/bin as a command (never run)
+#    .apk         → scanned with apkscan, report saved
+#    .AppImage    → handed to appdrop
+#    .bin         → copied to ~/cardputer/firmware
+#
+#  Every change pops a notification with an Undo button
+#  (needs termux-api). Change what goes where: dropwatch rules
+#
+#  First time:  bash dropwatch.sh install
+# ─────────────────────────────────────────────────────────────
+set -u
+shopt -u patsub_replacement 2>/dev/null || true
+VERSION="1.0"
+
+DL="${DROPWATCH_DIR:-/storage/emulated/0/Download}"
+BIN="${DROPWATCH_BIN:-$HOME/bin}"
+DATA="${XDG_DATA_HOME:-$HOME/.local/share}/dropwatch"
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/dropwatch"
+RULES="$CONF/rules.conf"
+SEEN_FILE="$DATA/seen"
+JOURNAL="$DATA/journal"
+BACKUPS="$DATA/backup"
+LOG="$DATA/dropwatch.log"
+PIDFILE="$DATA/dropwatch.pid"
+REPORTS="$HOME/dropwatch/reports"
+FIRMWARE="$HOME/cardputer/firmware"
+APPDROP_HOME="${APPDROP_HOME:-$HOME/appdrop}"
+INTERVAL="${DROPWATCH_INTERVAL:-3}"   # seconds between checks
+SETTLE=3                              # a file must sit this long untouched before it's handled
+SELF="$BIN/dropwatch"
+HERE="$(readlink -f "${BASH_SOURCE[0]}")"
+
+DAEMON=0
+QUIET=0
+FORCE_NAME=""
+RULES_MTIME=""
+declare -A SEEN=() RULE=()
+
+if [[ -t 1 ]]; then
+  G=$'\e[32m' Y=$'\e[33m' R=$'\e[31m' D=$'\e[2m' B=$'\e[1m' N=$'\e[0m'
+else
+  G='' Y='' R='' D='' B='' N=''
+fi
+
+# ── helpers ──────────────────────────────────────────────────
+say()    { (( QUIET )) || printf '%s\n' "$*"; }
+now()    { printf '%s' "${EPOCHSECONDS:-$(date +%s)}"; }
+pretty() { local p="$1"; printf '%s' "${p/#"$HOME"/\~}"; }
+mkdirs() { mkdir -p "$DATA" "$BACKUPS" "$CONF"; }
+new_id() { printf '%s%03d' "$(now)" $((RANDOM % 1000)); }
+
+log() {
+  local line
+  printf -v line '%(%m-%d %H:%M:%S)T  %s' -1 "$*"
+  if (( DAEMON )); then
+    printf '%s\n' "$line"            # daemon stdout already goes to the log
+  else
+    mkdirs; printf '%s\n' "$line" >>"$LOG"
+    say "$*"
+  fi
+}
+
+US=$'\x1f'   # field separator for the journal (keeps empty fields, unlike tabs)
+journal() { local IFS="$US"; printf '%s\n' "$*" >>"$JOURNAL"; }
+
+is_running() {
+  [[ -f $PIDFILE ]] || return 1
+  local pid; pid="$(<"$PIDFILE")"
+  [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null
+}
+
+same_file() {
+  [[ -f $1 && -f $2 ]] || return 1
+  if command -v cmp >/dev/null 2>&1; then cmp -s -- "$1" "$2"
+  else [[ "$(md5sum <"$1")" == "$(md5sum <"$2")" ]]; fi
+}
+
+is_script_file() { [[ "$(head -c 2 -- "$1" 2>/dev/null)" == '#!' ]]; }
+
+# "fkey (1).sh" → "fkey"
+clean_name() {
+  local n="$1"
+  case "${n,,}" in *.sh|*.bash|*.py) n="${n%.*}" ;; esac
+  n="$(sed -E 's/ ?\([0-9]+\)$//' <<<"$n")"
+  n="${n// /-}"
+  printf '%s' "$n"
+}
+
+notify() {  # notify TEXT [undo-id] [file-to-open]
+  command -v termux-notification >/dev/null 2>&1 || return 0
+  local nid="dropwatch-${2:-$RANDOM}"
+  local args=(--id "$nid" --group dropwatch --title "dropwatch" --content "$1")
+  [[ -n ${2:-} ]] && args+=(--button1 "Undo" --button1-action "bash $(printf %q "$SELF") undo $2")
+  [[ -n ${3:-} ]] && args+=(--button2 "Open" --button2-action "termux-open $(printf %q "$3")")
+  # timeout: termux-api hangs forever if the Termux:API app is missing
+  timeout 10 termux-notification "${args[@]}" >/dev/null 2>&1 </dev/null &
+}
+
+write_default_rules() {
+  mkdirs
+  cat >"$RULES" <<'EOF'
+# dropwatch rules — what happens to each new file in Download
+#
+#   extension = handler
+#
+# handlers:
+#   script     install to ~/bin as a command (never runs it)
+#   apk        scan with apkscan, report in ~/dropwatch/reports
+#   appimage   move to appdrop and install it
+#   firmware   copy to ~/cardputer/firmware
+#   ignore     leave it alone
+#   run:CMD    run your own command; {} becomes the file path
+#
+# Files with no rule that start with #! are treated as scripts.
+# Changes take effect on the next file — no restart needed.
+
+sh       = script
+bash     = script
+py       = script
+apk      = apk
+appimage = appimage
+bin      = firmware
+
+# examples:
+# zip = run:unzip -o {} -d ~/unzipped
+# pdf = ignore
+EOF
+}
+
+load_rules() {
+  [[ -f $RULES ]] || write_default_rules
+  local m; m="$(stat -c %Y "$RULES" 2>/dev/null)"
+  [[ $m == "$RULES_MTIME" ]] && return 0
+  RULES_MTIME="$m"
+  RULE=()
+  local line k v
+  while IFS= read -r line || [[ -n $line ]]; do
+    [[ $line =~ ^[[:space:]]*(#|$) ]] && continue
+    [[ $line == *=* ]] || continue
+    k="${line%%=*}"; v="${line#*=}"
+    k="${k//[[:space:]]/}"; k="${k#.}"; k="${k,,}"
+    v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
+    [[ -n $k && -n $v ]] && RULE["$k"]="$v"
+  done <"$RULES"
+}
+
+# ── handlers ─────────────────────────────────────────────────
+do_script() {
+  local f="$1" name tool dest tmp id bak="" msg other t
+  name="${f##*/}"
+  tool="${FORCE_NAME:-$(clean_name "$name")}"
+  if [[ ! $tool =~ ^[A-Za-z0-9._+-]+$ ]]; then
+    log "skip  $name (odd name — use: dropwatch route FILE NAME)"; return
+  fi
+  dest="$BIN/$tool"
+
+  # never shadow a real command like ls, git or cd
+  if [[ -z $FORCE_NAME ]]; then
+    t="$(type -t "$tool" 2>/dev/null || true)"
+    other="$(type -P "$tool" 2>/dev/null || true)"
+    if [[ $t == builtin || $t == keyword ]] || [[ -n $other && $other != "$dest" ]]; then
+      log "skip  $name — '$tool' is already a command (${other:-$t}). To install anyway: dropwatch route \"$name\" NEWNAME"
+      notify "Skipped $name: '$tool' is already a system command"
+      return
+    fi
+  fi
+
+  mkdir -p "$BIN"; mkdirs
+  tmp="$(mktemp "$DATA/.incoming.XXXXXX")" || return
+  if ! cp -- "$f" "$tmp"; then rm -f "$tmp"; log "fail  couldn't read $name"; return; fi
+  sed -i 's/\r$//' "$tmp"                                   # Windows line endings
+  if ! is_script_file "$tmp"; then                          # add a #! line if missing
+    if [[ ${name,,} == *.py ]]; then sed -i '1i #!/usr/bin/env python3' "$tmp"
+    else sed -i '1i #!/usr/bin/env bash' "$tmp"; fi
+  fi
+
+  if same_file "$tmp" "$dest"; then
+    rm -f "$tmp"; log "same  $tool is already up to date"
+    notify "$tool is already up to date"; return
+  fi
+
+  id="$(new_id)"
+  if [[ -e $dest ]]; then bak="$BACKUPS/$tool.$id"; cp -p -- "$dest" "$bak"; fi
+  chmod 755 "$tmp"; mv -f -- "$tmp" "$dest"
+  journal "$id" script "$dest" "$bak" "$name"
+  if [[ -n $bak ]]; then msg="Updated $tool"; else msg="Installed $tool → ~/bin"; fi
+  log "$msg  ($name)"
+  notify "$msg — run it with: $tool" "$id"
+
+  if [[ $tool == dropwatch ]] && (( DAEMON )); then
+    log "new dropwatch installed — reloading"
+    exec bash "$dest" _run
+  fi
+}
+
+do_apk() {
+  local f="$1" name="${1##*/}" report
+  if ! command -v apkscan >/dev/null 2>&1; then
+    log "skip  $name (apkscan not found)"; notify "New APK: $name (apkscan isn't installed)"; return
+  fi
+  mkdir -p "$REPORTS"
+  report="$REPORTS/${name%.*}.txt"
+  log "scan  $name → $(pretty "$report")"
+  notify "Scanning $name…"
+  (
+    timeout 900 apkscan "$f" </dev/null 2>&1 | sed 's/\x1b\[[0-9;]*[A-Za-z]//g' >"$report"
+    log "done  apkscan $name"
+    notify "Scan done: $name" "" "$report"
+  ) &
+}
+
+do_appimage() {
+  local f="$1" name="${1##*/}" runner=()
+  if command -v appdrop >/dev/null 2>&1; then runner=(appdrop)
+  elif [[ -f $APPDROP_HOME/appdrop.sh ]]; then runner=(bash "$APPDROP_HOME/appdrop.sh")
+  else
+    log "skip  $name (appdrop not found)"; notify "New AppImage: $name (appdrop isn't installed)"; return
+  fi
+  mkdir -p "$APPDROP_HOME/drop"
+  if ! mv -f -- "$f" "$APPDROP_HOME/drop/"; then log "fail  couldn't move $name"; return; fi
+  log "drop  $name → appdrop (moved out of Download to save space)"
+  notify "Installing $name with appdrop…"
+  (
+    "${runner[@]}" scan </dev/null
+    log "done  appdrop $name"
+    notify "appdrop finished: $name"
+  ) &
+}
+
+do_firmware() {
+  local f="$1" name="${1##*/}" dest id bak=""
+  mkdir -p "$FIRMWARE"
+  dest="$FIRMWARE/$name"
+  if same_file "$f" "$dest"; then log "same  $name is already in ~/cardputer/firmware"; return; fi
+  id="$(new_id)"
+  [[ -e $dest ]] && { bak="$BACKUPS/fw.$name.$id"; cp -p -- "$dest" "$bak"; }
+  if ! cp -- "$f" "$dest"; then log "fail  couldn't copy $name"; return; fi
+  journal "$id" firmware "$dest" "$bak" "$name"
+  log "fw    $name → ~/cardputer/firmware"
+  notify "Saved Cardputer firmware: $name" "$id"
+}
+
+do_run() {
+  local tmpl="$1" f="$2" q cmd
+  printf -v q '%q' "$f"
+  cmd="${tmpl//\{\}/$q}"
+  [[ $cmd == "$tmpl" ]] && cmd="$tmpl $q"
+  log "run   $cmd"
+  ( bash -c "$cmd" </dev/null; log "done  (exit $?) ${f##*/}" ) &
+}
+
+handle() {
+  local f="$1" name ext="" rule=""
+  name="${f##*/}"
+  [[ -s $f ]] || { log "skip  $name (empty)"; return; }
+  if [[ -n $FORCE_NAME ]]; then do_script "$f"; return; fi
+  load_rules
+  [[ $name == *.* ]] && ext="${name##*.}"
+  ext="${ext,,}"
+  [[ -n $ext ]] && rule="${RULE[$ext]:-}"
+  [[ -z $rule ]] && is_script_file "$f" && rule=script
+  case "$rule" in
+    script)   do_script "$f" ;;
+    apk)      do_apk "$f" ;;
+    appimage) do_appimage "$f" ;;
+    firmware) do_firmware "$f" ;;
+    run:*)    do_run "${rule#run:}" "$f" ;;
+    ignore)   log "skip  $name (ignored by rules)" ;;
+    "")       log "skip  $name (no rule for .${ext:-<none>})" ;;
+    *)        log "skip  $name (unknown handler '$rule' in rules.conf)" ;;
+  esac
+}
+
+# ── the watcher ──────────────────────────────────────────────
+list_downloads() { find "$DL" -maxdepth 1 -type f -printf '%f\t%s\t%T@\n' 2>/dev/null; }
+
+load_seen() {
+  SEEN=()
+  [[ -f $SEEN_FILE ]] || return 0
+  local k
+  while IFS= read -r k; do [[ -n $k ]] && SEEN["$k"]=1; done <"$SEEN_FILE"
+}
+
+seed_seen() {  # first run: everything already in Download counts as old
+  mkdirs
+  local name size mtime
+  list_downloads | while IFS=$'\t' read -r name size mtime; do
+    printf '%s|%s|%s\n' "$name" "$size" "${mtime%.*}"
+  done >"$SEEN_FILE"
+}
+
+cmd_run() {
+  DAEMON=1
+  mkdirs
+  echo $$ >"$PIDFILE"
+  load_seen
+  log "dropwatch $VERSION watching $DL (pid $$)"
+  local name size mtime key t
+  while :; do
+    # if another copy started, let it win
+    [[ -f $PIDFILE && "$(<"$PIDFILE")" == "$$" ]] || { log "another dropwatch took over — exiting"; exit 0; }
+    if [[ ! -r $DL ]]; then
+      log "can't read $DL — run termux-setup-storage"; sleep 30; continue
+    fi
+    t="$(now)"
+    while IFS=$'\t' read -r name size mtime; do
+      case "$name" in ''|.*|*.crdownload|*.part|*.partial|*.tmp|*.download) continue ;; esac
+      mtime="${mtime%.*}"
+      key="$name|$size|$mtime"
+      [[ -n ${SEEN[$key]+x} ]] && continue
+      (( t - mtime < SETTLE )) && continue      # still downloading
+      SEEN["$key"]=1
+      printf '%s\n' "$key" >>"$SEEN_FILE"
+      handle "$DL/$name"
+    done < <(list_downloads)
+    sleep "$INTERVAL"
+  done
+}
+
+# ── commands ─────────────────────────────────────────────────
+cmd_start() {
+  mkdirs
+  if is_running; then say "dropwatch is already running (pid $(<"$PIDFILE"))"; return 0; fi
+  if [[ ! -r $DL ]]; then
+    say "${R}Can't read $DL.${N} Run ${B}termux-setup-storage${N}, allow access, then: dropwatch start"
+    return 1
+  fi
+  if [[ ! -f $SEEN_FILE ]]; then
+    seed_seen
+    say "${D}First run: leaving the $(wc -l <"$SEEN_FILE") files already in Download alone.${N}"
+  fi
+  [[ -f $RULES ]] || write_default_rules
+  nohup bash "$HERE" _run >>"$LOG" 2>&1 </dev/null &
+  local pid=$!
+  echo "$pid" >"$PIDFILE"
+  disown 2>/dev/null || true
+  sleep 0.5
+  if kill -0 "$pid" 2>/dev/null; then
+    say "${G}dropwatch is watching${N} $DL"
+  else
+    say "${R}dropwatch didn't start${N} — check: dropwatch log"; return 1
+  fi
+}
+
+cmd_stop() {
+  if ! is_running; then say "dropwatch isn't running"; rm -f "$PIDFILE"; return 0; fi
+  local pid; pid="$(<"$PIDFILE")"
+  rm -f "$PIDFILE"
+  kill "$pid" 2>/dev/null
+  log "stopped (pid $pid)"
+}
+
+cmd_status() {
+  if is_running; then say "${G}●${N} dropwatch $VERSION is ${G}running${N} (pid $(<"$PIDFILE"))"
+  else say "${R}●${N} dropwatch $VERSION is ${R}stopped${N} — start it with: dropwatch start"; fi
+  say "${D}watching${N}  $DL"
+  say "${D}rules${N}     $(pretty "$RULES")"
+  if [[ -s $LOG ]]; then
+    say ""; say "${B}Recent:${N}"
+    tail -n 8 "$LOG" | sed 's/^/  /'
+  fi
+  say ""; say "${D}dropwatch help — all commands${N}"
+}
+
+cmd_log() {
+  [[ -f $LOG ]] || { say "No log yet."; return; }
+  if [[ ${1:-} == -f ]]; then exec tail -n 20 -f "$LOG"; fi
+  tail -n "${1:-40}" "$LOG"
+}
+
+cmd_history() {
+  if [[ ! -s $JOURNAL ]]; then say "Nothing to undo yet."; return; fi
+  say "${B}Changes you can undo (newest first):${N}"
+  local id kind dest bak src
+  tac "$JOURNAL" | while IFS="$US" read -r id kind dest bak src; do
+    printf '  %s  %-8s %s → %s%s\n' "$id" "$kind" "$src" "$(pretty "$dest")" "${bak:+  ${D}(replaced an older version)${N}}"
+  done
+  say ""; say "Undo the newest: ${B}dropwatch undo${N}    a specific one: ${B}dropwatch undo ID${N}"
+}
+
+cmd_undo() {
+  local want="${1:-}" line id kind dest bak src msg
+  if [[ ! -s $JOURNAL ]]; then say "Nothing to undo."; return 1; fi
+  if [[ -n $want ]]; then line="$(grep -m1 "^${want}${US}" "$JOURNAL")"
+  else line="$(tail -n 1 "$JOURNAL")"; fi
+  [[ -n $line ]] || { say "No undo entry '$want' (it may already be undone)."; return 1; }
+  IFS="$US" read -r id kind dest bak src <<<"$line"
+  if [[ -n $bak && -f $bak ]]; then
+    mv -f -- "$bak" "$dest"; msg="put back the previous ${dest##*/}"
+  else
+    rm -f -- "$dest"; msg="removed ${dest##*/}"
+  fi
+  grep -v "^${id}${US}" "$JOURNAL" >"$JOURNAL.tmp"; mv -f "$JOURNAL.tmp" "$JOURNAL"
+  log "Undone: $msg"
+  command -v termux-notification-remove >/dev/null 2>&1 &&
+    { timeout 5 termux-notification-remove "dropwatch-$id" >/dev/null 2>&1 </dev/null & }
+  notify "Undone: $msg"
+}
+
+cmd_route() {
+  local f="${1:-}"
+  [[ -n $f ]] || { say "usage: dropwatch route FILE [NAME]"; return 1; }
+  [[ -f $f ]] || { [[ -f $DL/$f ]] && f="$DL/$f"; }
+  [[ -f $f ]] || { say "Not found: $1"; return 1; }
+  FORCE_NAME="${2:-}"
+  mkdirs
+  handle "$(readlink -f -- "$f")"
+  wait   # let apk/appimage jobs finish when run by hand
+}
+
+cmd_rules() {
+  mkdirs
+  [[ -f $RULES ]] || write_default_rules
+  "${EDITOR:-nano}" "$RULES"
+  say "Saved. New rules apply to the next file."
+}
+
+cmd_install() {
+  say "${B}Installing dropwatch $VERSION${N}"
+  mkdir -p "$BIN"; mkdirs
+  if [[ $HERE != "$(readlink -f -- "$SELF" 2>/dev/null)" ]]; then cp -f -- "$HERE" "$SELF"; fi
+  sed -i 's/\r$//' "$SELF"; chmod 755 "$SELF"
+  say "  ${G}✓${N} command    ~/bin/dropwatch"
+  [[ -f $RULES ]] || write_default_rules
+  say "  ${G}✓${N} rules      $(pretty "$RULES")"
+
+  # shell startup: make sure ~/bin is on PATH, then auto-start the watcher
+  local rc rcs=()
+  [[ -f $HOME/.zshrc || ${SHELL:-} == *zsh ]] && rcs+=("$HOME/.zshrc")
+  [[ -f $HOME/.bashrc || ${SHELL:-} != *zsh ]] && rcs+=("$HOME/.bashrc")
+  for rc in "${rcs[@]}"; do
+    touch "$rc"
+    case ":$PATH:" in
+      *":$BIN:"*) ;;
+      *) grep -q '# dropwatch path$' "$rc" || printf '\nexport PATH="$HOME/bin:$PATH"  # dropwatch path\n' >>"$rc" ;;
+    esac
+    grep -q '# dropwatch autostart' "$rc" ||
+      printf '\n# dropwatch autostart\n[ -x "$HOME/bin/dropwatch" ] && "$HOME/bin/dropwatch" start --quiet\n' >>"$rc"
+    say "  ${G}✓${N} autostart  $(pretty "$rc")"
+  done
+
+  # start on phone boot too, if Termux:Boot is set up
+  if [[ -d $HOME/.termux/boot ]]; then
+    printf '#!%s/bin/sh\n"$HOME/bin/dropwatch" start --quiet\n' "${PREFIX:-/data/data/com.termux/files/usr}" >"$HOME/.termux/boot/dropwatch"
+    chmod 755 "$HOME/.termux/boot/dropwatch"
+    say "  ${G}✓${N} starts when the phone boots (Termux:Boot)"
+  fi
+
+  # notifications
+  if ! command -v termux-notification >/dev/null 2>&1 && command -v pkg >/dev/null 2>&1; then
+    say "  … installing termux-api for notifications"
+    pkg install -y termux-api >/dev/null 2>&1 || true
+  fi
+  if command -v termux-notification >/dev/null 2>&1; then
+    say "  ${G}✓${N} notifications (needs the Termux:API app installed too)"
+  else
+    say "  ${Y}!${N} no notifications — run: pkg install termux-api"
+  fi
+
+  # storage access
+  if [[ ! -r $DL ]] && command -v termux-setup-storage >/dev/null 2>&1; then
+    say "  … asking for storage access — tap Allow"
+    termux-setup-storage; sleep 4
+  fi
+
+  # what's hooked up
+  local a="${Y}apkscan missing${N}" p="${Y}appdrop missing${N}"
+  command -v apkscan >/dev/null 2>&1 && a="${G}apkscan${N}"
+  { command -v appdrop >/dev/null 2>&1 || [[ -f $APPDROP_HOME/appdrop.sh ]]; } && p="${G}appdrop${N}"
+  say "  ${G}✓${N} handlers   ${G}scripts${N} · $a · $p · ${G}firmware${N}"
+
+  is_running && cmd_stop >/dev/null
+  say ""
+  bash "$SELF" start
+  say ""
+  say "Done. Download a script and it lands in ~/bin a few seconds later."
+  say "Check on it anytime: ${B}dropwatch${N}"
+}
+
+cmd_uninstall() {
+  is_running && cmd_stop
+  local rc
+  for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
+    [[ -f $rc ]] && sed -i '/# dropwatch autostart/,+1d' "$rc"
+  done
+  rm -f -- "$HOME/.termux/boot/dropwatch" "$SELF"
+  say "Removed dropwatch. Settings and history are still in $(pretty "$CONF") and $(pretty "$DATA")."
+}
+
+usage() {
+  cat <<EOF
+${B}dropwatch $VERSION${N} — auto-handles new files in your Download folder
+
+  dropwatch                     status + recent activity
+  dropwatch start | stop | restart
+  dropwatch log [-f]            show the log (-f follows it live)
+  dropwatch history             changes you can undo
+  dropwatch undo [ID]           undo the newest change (or a specific one)
+  dropwatch route FILE [NAME]   handle a file right now
+                                (NAME = install it as that command)
+  dropwatch rules               edit what happens to each file type
+  dropwatch install | uninstall
+
+By default:
+  scripts (.sh .bash .py, or #!)  → ~/bin as a command (installed, never run)
+  .apk                            → apkscan report in ~/dropwatch/reports
+  .AppImage                       → moved to appdrop and installed
+  .bin                            → copied to ~/cardputer/firmware
+EOF
+}
+
+# ── main ─────────────────────────────────────────────────────
+args=()
+for a in "$@"; do
+  case "$a" in -q|--quiet) QUIET=1 ;; *) args+=("$a") ;; esac
+done
+set -- "${args[@]}"
+cmd="${1:-status}"; shift || true
+
+case "$cmd" in
+  start)              cmd_start ;;
+  stop)               cmd_stop ;;
+  restart)            cmd_stop; cmd_start ;;
+  status)             cmd_status ;;
+  _run)               cmd_run ;;
+  log|logs)           cmd_log "$@" ;;
+  history|hist)       cmd_history ;;
+  undo)               cmd_undo "$@" ;;
+  route|now|add)      cmd_route "$@" ;;
+  rules)              cmd_rules ;;
+  install|setup)      cmd_install ;;
+  uninstall|remove)   cmd_uninstall ;;
+  help|-h|--help)     usage ;;
+  version|--version)  echo "dropwatch $VERSION" ;;
+  *)                  say "Unknown command: $cmd"; usage; exit 1 ;;
+esac

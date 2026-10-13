@@ -1,0 +1,363 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────
+#  offset — pipe offset & grade math, in feet and tenths
+#
+#    offset 2.4             every common bend for a 2.4 ft rise
+#    offset 2.4 45          one bend
+#    offset --run 5 22.5    you know the run instead
+#    offset 2.4 --run 5     find the bend for a rise + run
+#    offset 2.4 45 --roll 1.5      rolling offset
+#    offset grade 120 1%    fall over a distance
+#    offset                 menu
+#
+#  run      = rise / tan(angle)
+#  diagonal = rise / sin(angle)   (center to center)
+# ─────────────────────────────────────────────────────────────
+set -u
+VERSION="1.0"
+HIST="${XDG_DATA_HOME:-$HOME/.local/share}/offset/history"
+PLACES="${OFFSET_PLACES:-1}"           # decimal places for feet (1 = tenths)
+STD_ANGLES=(11.25 22.5 45)             # the fittings shown in the table
+TAKE=""                                # fitting take-off (ft), optional
+
+if [[ -t 1 ]]; then
+  G=$'\e[32m' Y=$'\e[33m' R=$'\e[31m' C=$'\e[36m' D=$'\e[2m' B=$'\e[1m' N=$'\e[0m'
+else
+  G='' Y='' R='' C='' D='' B='' N=''
+fi
+
+say() { printf '%s\n' "$*"; }
+err() { printf '%s\n' "${R}✗${N} $*" >&2; }
+
+# ── math (awk does the trig) ─────────────────────────────────
+m() { local e="$1"; shift; awk "$@" "BEGIN{pi=atan2(0,-1); r=pi/180; $e}"; }
+f() { awk -v x="$1" "BEGIN{printf \"%.${PLACES}f\", x + 0}"; }          # feet, tenths by default
+f2() { local p=$(( PLACES > 2 ? PLACES : 2 )); awk -v x="$1" "BEGIN{printf \"%.${p}f\", x + 0}"; }
+gt() { awk -v a="$1" -v b="$2" 'BEGIN{exit !(a > b)}'; }
+
+hist() { mkdir -p "${HIST%/*}"; printf '%(%m-%d %H:%M)T  %s\n' -1 "$*" >>"$HIST"; }
+
+# ── reading what you type ────────────────────────────────────
+to_feet() {  # 2.4 · 2.4ft · 28in · 28" · 2'5 · 2'5.5"  →  decimal feet
+  local v="${1// /}" ft inch
+  v="${v,,}"
+  case "$v" in
+    *\'*)    ft="${v%%\'*}"; inch="${v#*\'}"; inch="${inch%\"}"; inch="${inch%in}"; [[ -z $inch ]] && inch=0 ;;
+    *in|*\") inch="${v%in}"; inch="${inch%\"}"; ft=0 ;;
+    *ft)     ft="${v%ft}"; inch=0 ;;
+    *)       ft="$v"; inch=0 ;;
+  esac
+  [[ -z $ft ]] && ft=0
+  [[ $ft =~ ^[0-9]*\.?[0-9]+$ && $inch =~ ^[0-9]*\.?[0-9]+$ ]] || return 1
+  awk -v a="$ft" -v b="$inch" 'BEGIN{printf "%.6f", a + b/12}'
+}
+
+to_angle() {  # 45 · 22.5 · 22½ · 1/16 (bend fractions) → degrees
+  local v="${1//°/}"; v="${v// /}"
+  case "$v" in
+    1/4) v=90 ;; 1/8) v=45 ;; 1/16) v=22.5 ;; 1/32) v=11.25 ;; 1/64) v=5.625 ;;
+    11¼) v=11.25 ;; 22½) v=22.5 ;; 5⅝) v=5.625 ;;
+  esac
+  [[ $v =~ ^[0-9]*\.?[0-9]+$ ]] || return 1
+  awk -v a="$v" 'BEGIN{exit !(a > 0 && a < 90)}' || return 2
+  printf '%s' "$v"
+}
+
+to_slope() {  # 1% · 1 · 0.5 (percent) · 0.01ft/ft → percent
+  local v="${1// /}"
+  v="${v,,}"
+  if [[ $v == *ft/ft ]]; then
+    v="${v%ft/ft}"; [[ $v =~ ^[0-9]*\.?[0-9]+$ ]] || return 1
+    awk -v s="$v" 'BEGIN{printf "%.6f", s * 100}'; return
+  fi
+  v="${v%\%}"
+  [[ $v =~ ^[0-9]*\.?[0-9]+$ ]] || return 1
+  printf '%s' "$v"
+}
+
+alabel_pad() {  # label padded to 6 columns, so the table lines up
+  case "$1" in
+    5.625) printf '5⅝°   ' ;; 11.25) printf '11¼°  ' ;; 22.5) printf '22½°  ' ;;
+    *) local n; n="$(awk -v a="$1" 'BEGIN{printf "%g", a}')"; printf '%s°%*s' "$n" $(( 5 - ${#n} )) '' ;;
+  esac
+}
+
+alabel() {
+  case "$1" in
+    5.625) printf '5⅝°' ;; 11.25) printf '11¼°' ;; 22.5) printf '22½°' ;;
+    *) awk -v a="$1" 'BEGIN{printf "%g°", a}' ;;
+  esac
+}
+
+# ── the calculations ─────────────────────────────────────────
+cut_line() {  # cut_line DIAGONAL — cut length after fitting take-offs
+  [[ -n $TAKE ]] || return 0
+  local cut; cut="$(m 'printf "%.6f", d - 2*t' -v d="$1" -v t="$TAKE")"
+  if gt 0 "$cut"; then say "  ${R}Cut length        too short — the fittings alone take more than the diagonal${N}"
+  else say "  ${B}Cut length        $(f "$cut") ft${N}  ${D}(diagonal − 2 × $(f "$TAKE") take-off)${N}"; fi
+}
+
+one_bend() {  # one_bend RISE ANGLE [label]
+  local h="$1" a="$2" run diag
+  read -r run diag < <(m 'printf "%.6f %.6f", h*cos(a*r)/sin(a*r), h/sin(a*r)' -v h="$h" -v a="$a")
+  say "${B}${3:-Offset} $(f "$h") ft with $(alabel "$a") bends${N}"
+  say "  Run (advance)     ${C}$(f "$run") ft${N}"
+  say "  Diagonal (c-c)    ${C}$(f "$diag") ft${N}"
+  cut_line "$diag"
+  local c=""
+  if [[ -n $TAKE ]]; then
+    c="$(m 'printf "%.6f", d-2*t' -v d="$diag" -v t="$TAKE")"
+    if gt 0 "$c"; then c="  cut too short"; else c="  cut $(f "$c")"; fi
+  fi
+  hist "rise $(f "$h") @ $(alabel "$a") → run $(f "$run")  diag $(f "$diag")$c"
+}
+
+table() {  # table RISE — every standard bend
+  local h="$1" a run diag cut
+  say "${B}Offset $(f "$h") ft${N}"
+  if [[ -n $TAKE ]]; then
+    printf "  ${D}%-6s %9s %10s %9s${N}\n" "bend" "run" "diagonal" "cut"
+  else
+    printf "  ${D}%-6s %9s %10s${N}\n" "bend" "run" "diagonal"
+  fi
+  local line=""
+  for a in "${STD_ANGLES[@]}"; do
+    read -r run diag < <(m 'printf "%.6f %.6f", h*cos(a*r)/sin(a*r), h/sin(a*r)' -v h="$h" -v a="$a")
+    if [[ -n $TAKE ]]; then
+      cut="$(m 'printf "%.6f", d - 2*t' -v d="$diag" -v t="$TAKE")"
+      gt 0 "$cut" && cut="—" || cut="$(f "$cut")"
+      printf "  %s %9s %10s %9s\n" "$(alabel_pad "$a")" "$(f "$run")" "$(f "$diag")" "$cut"
+    else
+      printf "  %s %9s %10s\n" "$(alabel_pad "$a")" "$(f "$run")" "$(f "$diag")"
+    fi
+    line+="$(alabel "$a") run $(f "$run") diag $(f "$diag"); "
+  done
+  say "  ${D}feet · diagonal is center to center${N}"
+  hist "rise $(f "$h"): ${line%; }"
+}
+
+from_run() {  # from_run RUN ANGLE
+  local u="$1" a="$2" h diag
+  read -r h diag < <(m 'printf "%.6f %.6f", u*sin(a*r)/cos(a*r), u/cos(a*r)' -v u="$u" -v a="$a")
+  say "${B}Run $(f "$u") ft with $(alabel "$a") bends${N}"
+  say "  Rise (offset)     ${C}$(f "$h") ft${N}"
+  say "  Diagonal (c-c)    ${C}$(f "$diag") ft${N}"
+  cut_line "$diag"
+  hist "run $(f "$u") @ $(alabel "$a") → rise $(f "$h")  diag $(f "$diag")"
+}
+
+find_bend() {  # find_bend RISE RUN
+  local h="$1" u="$2" a diag best="" bd=999 s d
+  read -r a diag < <(m 'printf "%.6f %.6f", atan2(h,u)/r, sqrt(h*h+u*u)' -v h="$h" -v u="$u")
+  say "${B}Rise $(f "$h") ft over a run of $(f "$u") ft${N}"
+  say "  Bend angle        ${C}$(awk -v a="$a" 'BEGIN{printf "%.1f", a}')°${N}"
+  say "  Diagonal (c-c)    ${C}$(f "$diag") ft${N}"
+  cut_line "$diag"
+  for s in 5.625 "${STD_ANGLES[@]}"; do
+    d="$(awk -v a="$a" -v s="$s" 'BEGIN{x=a-s; if(x<0)x=-x; printf "%.6f", x}')"
+    gt "$bd" "$d" && { bd="$d"; best="$s"; }
+  done
+  local run2; run2="$(m 'printf "%.6f", h*cos(a*r)/sin(a*r)' -v h="$h" -v a="$best")"
+  say "  ${D}Closest fitting: $(alabel "$best") — that needs a run of $(f "$run2") ft for this rise${N}"
+  hist "rise $(f "$h") run $(f "$u") → $(awk -v a="$a" 'BEGIN{printf "%.1f", a}')°  diag $(f "$diag")"
+}
+
+rolling() {  # rolling RISE ROLL [ANGLE] — offset in two directions at once
+  local h="$1" w="$2" a="${3:-}" t tilt
+  read -r t tilt < <(m 'printf "%.6f %.6f", sqrt(h*h+w*w), atan2(h,w)/r' -v h="$h" -v w="$w")
+  say "${B}Rolling offset: $(f "$h") ft up/down + $(f "$w") ft sideways${N}"
+  say "  True offset       ${C}$(f "$t") ft${N}"
+  say "  Roll the bends    ${C}$(awk -v x="$tilt" 'BEGIN{printf "%.1f", x}')°${N} up from level"
+  if [[ -n $a ]]; then
+    local run diag
+    read -r run diag < <(m 'printf "%.6f %.6f", h*cos(a*r)/sin(a*r), h/sin(a*r)' -v h="$t" -v a="$a")
+    say "  With $(alabel "$a") bends:"
+    say "  Run (advance)     ${C}$(f "$run") ft${N}"
+    say "  Diagonal (c-c)    ${C}$(f "$diag") ft${N}"
+    cut_line "$diag"
+    hist "rolling $(f "$h")+$(f "$w") (true $(f "$t")) @ $(alabel "$a") → run $(f "$run") diag $(f "$diag")"
+  else
+    say ""; table "$t" | tail -n +2
+  fi
+}
+
+grade() {  # grade DIST SLOPE% | grade DIST --fall FALL ; optional START elevation
+  local dist="$1" slope="$2" fall="$3" from="${4:-}"
+  if [[ -n $slope ]]; then
+    fall="$(awk -v d="$dist" -v s="$slope" 'BEGIN{printf "%.6f", d*s/100}')"
+  else
+    slope="$(awk -v d="$dist" -v f="$fall" 'BEGIN{printf "%.6f", f/d*100}')"
+  fi
+  say "${B}Grade over $(f "$dist") ft${N}"
+  say "  Slope             ${C}$(awk -v s="$slope" 'BEGIN{printf "%.2f", s}')%${N}  ${D}($(awk -v s="$slope" 'BEGIN{printf "%.4f", s/100}') ft/ft)${N}"
+  say "  Fall              ${C}$(f2 "$fall") ft${N}"
+  say "  Per 10 ft         $(awk -v s="$slope" 'BEGIN{printf "%.3f", s/10}') ft"
+  if [[ -n $from ]]; then
+    say "  Start elevation   $(f2 "$from")"
+    say "  End elevation     ${C}$(f2 "$(awk -v a="$from" -v b="$fall" 'BEGIN{print a-b}')")${N}  ${D}(running downhill)${N}"
+  fi
+  hist "grade $(f "$dist") ft @ $(awk -v s="$slope" 'BEGIN{printf "%.2f", s}')% → fall $(f2 "$fall")${from:+  end $(f2 "$(awk -v a="$from" -v b="$fall" 'BEGIN{print a-b}')")}"
+}
+
+# ── menu ─────────────────────────────────────────────────────
+ask() {  # ask PROMPT PARSER [default] → value on stdout ; empty input cancels
+  local prompt="$1" parser="$2" def="${3:-}" in val rc
+  while :; do
+    read -rp "  $prompt${def:+ [$def]}: " in || return 1
+    in="${in:-$def}"
+    [[ -z $in ]] && return 1
+    val="$("$parser" "$in")"; rc=$?
+    if (( rc == 0 )); then printf '%s' "$val"; return 0; fi
+    if (( rc == 2 )); then err "Bend has to be between 0 and 90° (a 90 doesn't make an offset)"
+    else err "Didn't get that — try like 2.4, 28in, 2'5, 45, 22.5 or 1/16"; fi
+  done
+}
+
+ask_take() {
+  local t
+  t="$(ask "Fitting take-off, each (Enter to skip)" to_feet)" && TAKE="$t" || TAKE=""
+}
+
+menu_pick() {
+  local items=(
+    "📏 I know the rise — show every bend"
+    "📐 I know the rise and the bend"
+    "↔  I know the run and the bend"
+    "🎯 Find the bend — I know rise and run"
+    "🔀 Rolling offset (up/down and sideways)"
+    "📉 Grade / fall"
+    "🕘 Recent calculations"
+  )
+  if command -v fzf >/dev/null 2>&1; then
+    printf '%s\n' "${items[@]}" | fzf --height=60% --reverse --no-sort --border=rounded --info=hidden \
+      --prompt "offset > " --header "feet & tenths · Esc = quit"
+  else
+    local i n; for i in "${!items[@]}"; do printf '  %d) %s\n' $((i + 1)) "${items[$i]}" >&2; done
+    read -rp "Pick 1-${#items[@]} (Enter quits): " n
+    [[ $n =~ ^[1-7]$ ]] && printf '%s\n' "${items[$((n - 1))]}"
+  fi
+}
+
+menu() {
+  local c h u a w d s fl from
+  while :; do
+    c="$(menu_pick)" || return 0
+    [[ -n $c ]] || return 0
+    echo
+    case "$c" in
+      *"every bend"*)
+        h="$(ask "Rise (offset)" to_feet)" || continue
+        ask_take; echo; table "$h" ;;
+      *"rise and the bend"*)
+        h="$(ask "Rise (offset)" to_feet)" || continue
+        a="$(ask "Bend angle" to_angle 45)" || continue
+        ask_take; echo; one_bend "$h" "$a" ;;
+      *"run and the bend"*)
+        u="$(ask "Run (advance)" to_feet)" || continue
+        a="$(ask "Bend angle" to_angle 45)" || continue
+        ask_take; echo; from_run "$u" "$a" ;;
+      *"Find the bend"*)
+        h="$(ask "Rise (offset)" to_feet)" || continue
+        u="$(ask "Run (advance)" to_feet)" || continue
+        ask_take; echo; find_bend "$h" "$u" ;;
+      *Rolling*)
+        h="$(ask "Up/down offset" to_feet)" || continue
+        w="$(ask "Sideways offset" to_feet)" || continue
+        a="$(ask "Bend angle (Enter = show all)" to_angle)" || a=""
+        ask_take; echo; rolling "$h" "$w" "$a" ;;
+      *Grade*)
+        d="$(ask "Distance" to_feet)" || continue
+        s="$(ask "Slope % (Enter if you know the fall instead)" to_slope)" || s=""
+        if [[ -z $s ]]; then fl="$(ask "Fall" to_feet)" || continue; fi
+        from="$(ask "Start elevation (Enter to skip)" to_number)" || from=""
+        echo; grade "$d" "$s" "${fl:-}" "$from" ;;
+      *Recent*)
+        if [[ -s $HIST ]]; then tail -n 15 "$HIST"; else say "Nothing yet."; fi ;;
+    esac
+    echo; [[ -t 0 ]] && { read -rsn1 -p "${D}press any key${N}" _; echo; }
+  done
+}
+
+to_number() { [[ $1 =~ ^-?[0-9]*\.?[0-9]+$ ]] && printf '%s' "$1"; }
+
+usage() {
+  cat <<EOF
+${B}offset $VERSION${N} — pipe offset & grade math, in feet and tenths
+
+  offset                       menu
+  offset RISE                  run + diagonal for 11¼, 22½ and 45 bends
+  offset RISE ANGLE            one bend          e.g.  offset 2.4 45
+  offset --run RUN ANGLE       you know the run  e.g.  offset --run 5 22.5
+  offset RISE --run RUN        find the bend     e.g.  offset 2.4 --run 5
+  offset RISE [ANGLE] --roll SIDEWAYS     rolling offset
+  offset grade DIST SLOPE%     fall              e.g.  offset grade 120 1%
+  offset grade DIST --fall FALL                slope
+         …add --from ELEV for the end elevation
+  offset history               recent calculations
+
+Options:  --take T   fitting take-off (each end) → also shows the cut length
+          -2         hundredths instead of tenths
+Lengths:  2.4  ·  2.4ft  ·  28in  ·  2'5   (quote the ' in the shell: "2'5")
+Angles:   45  ·  22.5  ·  11.25  ·  1/8  ·  1/16  ·  1/32
+EOF
+}
+
+# ── main ─────────────────────────────────────────────────────
+pos=() run="" roll="" fall="" from="" RUN_FIRST=0
+while (( $# )); do
+  case "$1" in
+    --run)        run="${2:-}"; (( ${#pos[@]} == 0 )) && RUN_FIRST=1; shift 2 || shift ;;
+    --roll)       roll="${2:-}"; shift 2 || shift ;;
+    --take)       TAKE="${2:-}"; shift 2 || shift ;;
+    --fall)       fall="${2:-}"; shift 2 || shift ;;
+    --from)       from="${2:-}"; shift 2 || shift ;;
+    -2)           PLACES=2; shift ;;
+    -h|--help|help) usage; exit 0 ;;
+    *)            pos+=("$1"); shift ;;
+  esac
+done
+
+bad() { err "$1"; exit 1; }
+feet()  { to_feet "$1" || bad "Not a length: $1  (try 2.4, 28in or \"2'5\")"; }
+angle() { local v rc; v="$(to_angle "$1")"; rc=$?
+          (( rc == 2 )) && bad "Bend has to be between 0 and 90°"; (( rc )) && bad "Not an angle: $1"; printf '%s' "$v"; }
+
+if [[ -n $TAKE ]]; then TAKE="$(feet "$TAKE")" || exit 1; fi
+
+if (( ${#pos[@]} == 0 )) && [[ -z $run$roll$fall ]]; then
+  menu; exit 0
+fi
+
+case "${pos[0]:-}" in
+  history|hist)
+    if [[ -s $HIST ]]; then tail -n 20 "$HIST"; else say "Nothing yet."; fi; exit 0 ;;
+  version|--version) echo "offset $VERSION"; exit 0 ;;
+  grade)
+    [[ -n ${pos[1]:-} ]] || bad "offset grade DIST SLOPE%  or  offset grade DIST --fall FALL"
+    d="$(feet "${pos[1]}")" || exit 1
+    s=""; fl=""
+    if [[ -n ${pos[2]:-} ]]; then s="$(to_slope "${pos[2]}")" || bad "Not a slope: ${pos[2]} (try 1% or 0.01ft/ft)"
+    elif [[ -n $fall ]]; then fl="$(feet "$fall")" || exit 1
+    else bad "Give a slope (like 1%) or --fall"; fi
+    if [[ -n $from ]]; then to_number "$from" >/dev/null || bad "Not an elevation: $from"; fi
+    grade "$d" "$s" "$fl" "$from"; exit 0 ;;
+esac
+
+if [[ -n $run && ${#pos[@]} -eq 0 ]]; then bad "offset --run RUN ANGLE"; fi
+
+# work out what was asked from the order of the arguments:
+#   offset --run 5 22.5  → run + bend      offset 2.4 --run 5 → rise + run
+if [[ -n $run ]]; then
+  u="$(feet "$run")" || exit 1
+  if (( RUN_FIRST )); then a="$(angle "${pos[0]}")" || exit 1; from_run "$u" "$a"
+  else h="$(feet "${pos[0]}")" || exit 1; find_bend "$h" "$u"; fi
+elif [[ -n $roll ]]; then
+  h="$(feet "${pos[0]}")" || exit 1
+  w="$(feet "$roll")" || exit 1
+  a=""; if [[ -n ${pos[1]:-} ]]; then a="$(angle "${pos[1]}")" || exit 1; fi
+  rolling "$h" "$w" "$a"
+elif (( ${#pos[@]} == 1 )); then
+  h="$(feet "${pos[0]}")" || exit 1; table "$h"
+else
+  h="$(feet "${pos[0]}")" || exit 1; a="$(angle "${pos[1]}")" || exit 1; one_bend "$h" "$a"
+fi

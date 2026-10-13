@@ -1,0 +1,545 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────
+#  cardkey — run your Cardputer from Termux over Wi-Fi
+#
+#  Talks to the Launcher's WebUI, so on the Cardputer open:
+#      Launcher → WebUI   (stays up until you press Sel)
+#
+#  cardkey            menu (browse SD, send files, flash
+#                     firmware, boot apps, Wi-Fi, backups…)
+#  cardkey help       every command
+#
+#  Finds the Cardputer by itself (launcher.local, its own
+#  hotspot, or a quick scan of your Wi-Fi) and logs in for you.
+# ─────────────────────────────────────────────────────────────
+set -u
+shopt -u patsub_replacement 2>/dev/null || true
+VERSION="1.0"
+
+CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/cardkey"
+CONF="$CONF_DIR/config"
+JAR="$CONF_DIR/session"
+CP_HOME="$HOME/cardputer"
+FW_DIR="$CP_HOME/firmware"          # dropwatch drops .bin downloads here
+SD_COPY="$CP_HOME/sd"               # files pulled off the SD card
+NVS_DIR="$CP_HOME/nvs"              # settings backups
+DL_DIR="${CARDKEY_DOWNLOADS:-/storage/emulated/0/Download}"
+
+HOST="" USERNAME="admin" PASSWORD="launcher"   # Launcher's default WebUI login
+# shellcheck disable=SC1090
+[[ -f $CONF ]] && source "$CONF"
+[[ -n ${CARDKEY_HOST:-} ]] && HOST="$CARDKEY_HOST"
+
+BODY="" CODE="" OUT="" TIMEOUT=30
+PY="$(command -v python3 || command -v python || true)"
+
+if [[ -t 1 ]]; then
+  G=$'\e[32m' Y=$'\e[33m' R=$'\e[31m' C=$'\e[36m' D=$'\e[2m' B=$'\e[1m' N=$'\e[0m'
+else
+  G='' Y='' R='' C='' D='' B='' N=''
+fi
+
+# ── basics ───────────────────────────────────────────────────
+say()  { printf '%s\n' "$*"; }
+err()  { printf '%s\n' "${R}✗${N} $*" >&2; }
+ok()   { printf '%s\n' "${G}✓${N} $*"; }
+pretty() { local p="$1"; printf '%s' "${p/#"$HOME"/\~}"; }
+pause() { [[ -t 0 ]] && { read -rsn1 -p "${D}press any key${N}" _; echo; }; }
+
+confirm() {
+  local a
+  read -rp "$1 [y/N] " a
+  [[ $a == [yY]* ]]
+}
+
+save_conf() {
+  mkdir -p "$CONF_DIR"
+  { printf 'HOST=%q\n' "$HOST"; printf 'USERNAME=%q\n' "$USERNAME"; printf 'PASSWORD=%q\n' "$PASSWORD"; } >"$CONF"
+  chmod 600 "$CONF"
+}
+
+need() {  # need CMD... — installs anything missing, automatically
+  local c missing=()
+  for c in "$@"; do command -v "$c" >/dev/null 2>&1 || missing+=("$c"); done
+  (( ${#missing[@]} )) || return 0
+  if command -v pkg >/dev/null 2>&1; then
+    say "${D}Installing ${missing[*]}…${N}"
+    pkg install -y "${missing[@]}" >/dev/null 2>&1
+  fi
+  for c in "${missing[@]}"; do
+    command -v "$c" >/dev/null 2>&1 || { err "cardkey needs $c — run: pkg install $c"; exit 1; }
+  done
+}
+
+join_path() { if [[ $1 == / ]]; then printf '/%s' "$2"; else printf '%s/%s' "${1%/}" "$2"; fi; }
+parent()    { local p="${1%/*}"; printf '%s' "${p:-/}"; }
+
+# ── finding the Cardputer ────────────────────────────────────
+probe() { [[ "$(curl -s -m "${2:-2}" "http://$1/ping" 2>/dev/null)" == launcher-pong ]]; }
+
+my_ip() {
+  local ip=""
+  if command -v termux-wifi-connectioninfo >/dev/null 2>&1; then
+    ip="$(timeout 6 termux-wifi-connectioninfo 2>/dev/null | sed -n 's/.*"ip": *"\([0-9.]*\)".*/\1/p' | head -n1)"
+  fi
+  [[ -z $ip || $ip == 0.0.0.0 ]] && ip="$(ifconfig 2>/dev/null | awk '/^wlan0/{f=1} f&&/inet /{print $2; exit}')"
+  [[ -z $ip ]] && ip="$(ip -4 addr show wlan0 2>/dev/null | awk '/inet /{sub(/\/.*/,"",$2); print $2; exit}')"
+  printf '%s' "$ip"
+}
+
+scan_wifi() {  # ask every address on the phone's Wi-Fi for the Launcher's /ping
+  local ip base
+  ip="$(my_ip)"
+  [[ $ip =~ ^([0-9]+\.[0-9]+\.[0-9]+)\.[0-9]+$ ]] || return 1
+  base="${BASH_REMATCH[1]}"
+  seq 1 254 | xargs -P 64 -I{} sh -c \
+    'r=$(curl -s -m 1.5 "http://$0.{}/ping" 2>/dev/null); [ "$r" = launcher-pong ] && echo "$0.{}"' "$base" 2>/dev/null |
+    head -n1
+}
+
+connect() {  # sets HOST to a Cardputer that answers, remembering it for next time
+  local h tried=()
+  for h in "$HOST" launcher.local 192.168.4.1; do
+    [[ -z $h || " ${tried[*]} " == *" $h "* ]] && continue
+    tried+=("$h")
+    if probe "$h"; then
+      [[ $h != "$HOST" ]] && { HOST="$h"; save_conf; }
+      return 0
+    fi
+  done
+  [[ -t 2 ]] && printf '%s' "${D}Looking for the Cardputer on your Wi-Fi…${N}" >&2
+  h="$(scan_wifi)"
+  [[ -t 2 ]] && printf '\r\e[K' >&2
+  if [[ -n $h ]]; then HOST="$h"; save_conf; return 0; fi
+  err "Can't find the Cardputer."
+  say "  On it, open ${B}Launcher → WebUI${N} and keep that screen up, then try again." >&2
+  say "  Its screen shows an IP — you can also set it: ${B}cardkey host 192.168.x.x${N}" >&2
+  return 1
+}
+
+login() {  # login [quiet]
+  mkdir -p "$CONF_DIR"
+  local attempt where
+  for attempt in 1 2 3; do
+    : >"$JAR"; chmod 600 "$JAR"
+    where="$(curl -sS -m 10 -c "$JAR" -o /dev/null -w '%{redirect_url}' \
+      --data-urlencode "username=$USERNAME" --data-urlencode "password=$PASSWORD" \
+      "http://$HOST/login" 2>/dev/null)"
+    if grep -q ESP32SESSION "$JAR" 2>/dev/null && [[ $where != *failed* ]]; then return 0; fi
+    if [[ ! -t 0 ]]; then err "Login to the Cardputer failed — run: cardkey login"; return 1; fi
+    say "${Y}The Cardputer didn't accept the login.${N} Its WebUI screen shows Usr and Pwd." >&2
+    read -rp "  Usr: " USERNAME
+    read -rsp "  Pwd: " PASSWORD; echo
+    save_conf
+  done
+  err "Still can't log in."; return 1
+}
+
+ready() {  # connect + log in once per run
+  [[ ${_READY:-0} == 1 ]] && return 0
+  need curl
+  connect || return 1
+  grep -q ESP32SESSION "$JAR" 2>/dev/null || login || return 1
+  _READY=1
+}
+
+# ── HTTP ─────────────────────────────────────────────────────
+_req() {  # _req PATH curl-args… → CODE, BODY (or the file OUT)
+  local path="$1"; shift
+  local tmp dest
+  tmp="$(mktemp)"
+  dest="${OUT:-$tmp}"
+  CODE="$(curl -sS --connect-timeout 5 -m "$TIMEOUT" -b "$JAR" -H 'Expect:' \
+          -o "$dest" -w '%{http_code}' "$@" "http://$HOST$path" 2>/dev/null)" || CODE="${CODE:-000}"
+  [[ -z $CODE ]] && CODE=000
+  if [[ -n $OUT && $CODE != 2?? ]]; then BODY="$(head -c 300 "$OUT" 2>/dev/null)"
+  elif [[ -z $OUT ]]; then BODY="$(<"$tmp")"
+  else BODY=""; fi
+  rm -f "$tmp"
+}
+
+req() {  # same, but logs in again if the session ran out, and explains failures
+  ready || return 1
+  _req "$@"
+  if [[ $CODE == 401 ]]; then login && _req "$@"; fi
+  case "$CODE" in
+    2??) return 0 ;;
+    000) err "Lost the Cardputer at $HOST — is the WebUI screen still open?" ;;
+    *)   err "Cardputer said: ${BODY:-HTTP $CODE}" ;;
+  esac
+  return 1
+}
+
+# ── SD card ──────────────────────────────────────────────────
+remote_ls() {  # prints TYPE<TAB>NAME<TAB>SIZE, folders first
+  req /listfiles -G --data-urlencode "folder=$1" || return 1
+  local line name
+  while IFS= read -r line; do
+    line="${line%$'\r'}"
+    case "$line" in
+      Fo:*) name="${line:3}"; printf 'D\t%s\t\n' "${name%:*}" ;;
+      Fi:*) name="${line:3}"; printf 'F\t%s\t%s\n' "${name%:*}" "${line##*:}" ;;
+    esac
+  done <<<"$BODY" | sort -t $'\t' -k1,1 -k2,2f
+}
+
+get_file() {  # get_file REMOTE LOCAL
+  mkdir -p "$(dirname -- "$2")"
+  OUT="$2.part" TIMEOUT=0 req /file -G --data-urlencode "name=$1" --data-urlencode "action=download" \
+    --speed-limit 1 --speed-time 30 || { rm -f "$2.part"; return 1; }
+  mv -f -- "$2.part" "$2"
+}
+
+get_dir() {  # get_dir REMOTE_DIR LOCAL_DIR — everything inside, recursively
+  local t name size
+  mkdir -p "$2"
+  while IFS=$'\t' read -r t name size; do
+    if [[ $t == D ]]; then get_dir "$(join_path "$1" "$name")" "$2/$name" || return 1
+    else
+      printf '  %s %s\n' "$(join_path "$1" "$name")" "${D}$size${N}"
+      get_file "$(join_path "$1" "$name")" "$2/$name" || return 1
+    fi
+  done < <(remote_ls "$1")
+}
+
+put_file() {  # put_file LOCAL REMOTE_DIR
+  local f="$1" dir="${2:-/}" name="${1##*/}" esc
+  [[ -f $f ]] || { err "No such file: $f"; return 1; }
+  esc="${f//\\/\\\\}"; esc="${esc//\"/\\\"}"
+  name="${name//\\/\\\\}"; name="${name//\"/\\\"}"
+  printf '  %s → %s ' "${f##*/}" "$dir"
+  if TIMEOUT=0 req / --form-string "folder=$dir" -F "file=@\"$esc\";filename=\"$name\"" \
+       --speed-limit 1 --speed-time 30; then
+    say "${G}✓${N}"
+  else
+    return 1
+  fi
+}
+
+remote_mkdir() { req /file -G --data-urlencode "name=$1" --data-urlencode "action=create"; }
+remote_rm()    { req /file -G --data-urlencode "name=$1" --data-urlencode "action=delete"; }
+remote_mv()    { req /rename --data-urlencode "filePath=$1" --data-urlencode "fileName=$2"; }
+
+install_from_sd() {  # install a .bin that's already on the SD card
+  req /UPDATE --data-urlencode "fileName=$1" || return 1
+  ok "Installing $1 on the Cardputer."
+  say "  Watch its screen — when it says ${B}Restart your Device${N}, restart it."
+}
+
+flash() {  # flash LOCAL.bin — send to /firmware on the SD, then install it
+  local f="$1"
+  [[ -f $f ]] || { err "No such file: $f"; return 1; }
+  [[ ${f,,} == *.bin ]] || { err "$f isn't a .bin firmware file"; return 1; }
+  ready || return 1
+  _req /file -G --data-urlencode "name=/firmware" --data-urlencode "action=create"   # fine if it exists
+  say "Sending firmware:"
+  put_file "$f" /firmware || return 1
+  install_from_sd "/firmware/${f##*/}"
+}
+
+# ── device ───────────────────────────────────────────────────
+sysinfo_json() { ready && _req /systeminfo && [[ $CODE == 2?? ]] && printf '%s' "$BODY"; }
+
+json() {  # json EXPR — reads JSON on stdin, prints with python (d = the data)
+  [[ -n $PY ]] || { cat; return; }
+  "$PY" -c "import json,sys
+d=json.load(sys.stdin)
+$1" 2>/dev/null
+}
+
+show_info() {
+  ready || return 1
+  local j; j="$(sysinfo_json)" || { err "Couldn't read system info"; return 1; }
+  say "${B}Cardputer${N} at $HOST"
+  printf '%s' "$j" | json '
+print("  Launcher  ", d.get("VERSION","?"))
+sd=d.get("SD",{})
+tot=float(sd.get("totalBytes",0) or 0)
+if tot <= 0:
+    print("  SD card    \033[31mnot detected\033[0m — reseat it or reboot the Cardputer")
+else:
+    print("  SD card   ", sd.get("free","?"), "free of", sd.get("total","?"), " (" + str(round(100*float(sd.get("usedBytes",0))/tot)) + "% used)")
+apps=d.get("APPS",[])
+print("  Apps      ", ", ".join(a.get("name") or a.get("label","?") for a in apps) if apps else "none listed")'
+}
+
+status_line() {
+  local j sd=""
+  if [[ -n $PY ]] && j="$(sysinfo_json)"; then
+    sd="$(printf '%s' "$j" | json '
+sd=d.get("SD",{})
+tot=float(sd.get("totalBytes",0) or 0)
+print(("SD " + sd.get("free","?") + " free") if tot > 0 else "SD card NOT detected")')"
+  fi
+  printf 'Cardputer @ %s%s' "$HOST" "${sd:+ · $sd}"
+}
+
+list_apps() {  # LABEL<TAB>NAME
+  sysinfo_json | json '
+for a in d.get("APPS",[]):
+    print(a.get("label",""), a.get("name") or a.get("label",""), sep="\t")'
+}
+
+boot_app() {  # boot_app LABEL
+  req /bootapp -G --data-urlencode "label=$1" || return 1
+  ok "Rebooting into $1 — the WebUI will close."
+}
+
+backup_nvs() {
+  req /nvs || return 1
+  mkdir -p "$NVS_DIR"
+  local f; f="$NVS_DIR/nvs-$(date +%Y%m%d-%H%M%S).json"
+  if [[ -n $PY ]]; then printf '%s' "$BODY" | "$PY" -m json.tool >"$f" 2>/dev/null || printf '%s' "$BODY" >"$f"
+  else printf '%s' "$BODY" >"$f"; fi
+  chmod 600 "$f"
+  ok "Settings saved to $(pretty "$f")"
+  say "  ${D}It includes saved Wi-Fi passwords in plain text — keep it private.${N}"
+}
+
+save_wifi() {  # save_wifi [SSID] — stores a network in the Launcher (no typing on the tiny keyboard)
+  local ssid="${1:-}" pass cur=""
+  if [[ -z $ssid ]] && command -v termux-wifi-connectioninfo >/dev/null 2>&1; then
+    cur="$(timeout 6 termux-wifi-connectioninfo 2>/dev/null | sed -n 's/.*"ssid": *"\([^"]*\)".*/\1/p' | head -n1)"
+    [[ $cur == *unknown* ]] && cur=""
+  fi
+  if [[ -z $ssid ]]; then
+    read -rp "Network name${cur:+ [$cur]}: " ssid
+    ssid="${ssid:-$cur}"
+  fi
+  [[ -n $ssid ]] || { err "No network name"; return 1; }
+  read -rsp "Password for $ssid: " pass; echo
+  [[ -n $pass ]] || { err "No password"; return 1; }
+  req /wifi -G --data-urlencode "ssid=$ssid" --data-urlencode "pwd=$pass" || return 1
+  ok "Saved $ssid on the Cardputer (in the Launcher's Wi-Fi list)."
+}
+
+# ── menus (fzf) ──────────────────────────────────────────────
+FZF_BASE=(--height=80% --reverse --no-sort --border=rounded --info=hidden)
+
+pick_local() {  # multi-pick files from ~/cardputer/firmware and Download, newest first
+  local filter="${1:-}"
+  find "$FW_DIR" "$DL_DIR" -maxdepth 1 -type f ! -name '.*' -printf '%T@\t%p\n' 2>/dev/null |
+    sort -rn | cut -f2- |
+    while IFS= read -r p; do
+      [[ -n $filter && ${p,,} != *"$filter" ]] && continue
+      printf '%s\t%s\n' "$(pretty "$p" | sed 's#^/storage/emulated/0#/sdcard#')" "$p"
+    done |
+    fzf "${FZF_BASE[@]}" -m --delimiter=$'\t' --with-nth=1 \
+      --prompt "pick > " --header "${2:-Tab picks several · Enter = go · Esc = back}" |
+    cut -f2
+}
+
+pick_remote_dir() {  # walk the SD card and choose a folder
+  local dir="${1:-/}" sel t name
+  while :; do
+    sel="$( { printf 'H\t\t✔  Put it here  (%s)\n' "$dir"
+              [[ $dir != / ]] && printf 'U\t\t⬆  ..\n'
+              printf 'N\t\t＋ New folder here\n'
+              remote_ls "$dir" | awk -F'\t' '$1=="D"{printf "D\t%s\t📁 %s/\n",$2,$2}'
+            } | fzf "${FZF_BASE[@]}" --delimiter=$'\t' --with-nth=3 --prompt "SD:$dir > " --header "Where on the SD card?")" || return 1
+    IFS=$'\t' read -r t name _ <<<"$sel"
+    case "$t" in
+      H) printf '%s' "$dir"; return 0 ;;
+      U) dir="$(parent "$dir")" ;;
+      D) dir="$(join_path "$dir" "$name")" ;;
+      N) read -rp "New folder name: " name </dev/tty
+         [[ -n $name ]] && remote_mkdir "$(join_path "$dir" "$name")" >/dev/null && dir="$(join_path "$dir" "$name")" ;;
+    esac
+  done
+}
+
+send_files_menu() {
+  local files dest
+  mapfile -t files < <(pick_local)
+  (( ${#files[@]} )) || return 0
+  dest="$(pick_remote_dir /)" || return 0
+  say "Sending ${#files[@]} file(s):"
+  local f; for f in "${files[@]}"; do put_file "$f" "$dest" || break; done
+  pause
+}
+
+flash_menu() {
+  local f
+  f="$(pick_local .bin "Pick the firmware to install · Esc = back" | head -n1)"
+  [[ -n $f ]] || return 0
+  confirm "Install ${B}${f##*/}${N} on the Cardputer?" && flash "$f"
+  pause
+}
+
+file_menu() {  # actions for one file on the SD card
+  local path="$1" size="$2" acts choice new
+  acts=("⬇  Download to phone" "✏  Rename" "🗑  Delete")
+  [[ ${path,,} == *.bin ]] && acts=("⚡ Install this firmware" "${acts[@]}")
+  choice="$(printf '%s\n' "${acts[@]}" | fzf "${FZF_BASE[@]}" --prompt "${path##*/} > " --header "$path  ($size)")" || return 0
+  case "$choice" in
+    *Install*)  confirm "Install ${path##*/} on the Cardputer?" && install_from_sd "$path"; pause ;;
+    *Download*) get_file "$path" "$SD_COPY$path" && ok "Saved to $(pretty "$SD_COPY$path")"; pause ;;
+    *Rename*)   read -rp "New name for ${path##*/}: " new
+                [[ -n $new ]] && remote_mv "$path" "$new" && ok "Renamed to $new"; pause ;;
+    *Delete*)   confirm "Delete $path from the SD card?" && remote_rm "$path" && ok "Deleted"; pause ;;
+  esac
+}
+
+browse_menu() {
+  local dir="${1:-/}" sel t name size
+  while :; do
+    sel="$( { [[ $dir != / ]] && printf 'U\t\t\t⬆  ..\n'
+              printf 'P\t\t\t📤 Upload files here\n'
+              printf 'G\t\t\t⬇  Download this whole folder\n'
+              printf 'N\t\t\t＋ New folder\n'
+              remote_ls "$dir" | awk -F'\t' '{ if ($1=="D") printf "D\t%s\t\t📁 %s/\n",$2,$2; else printf "F\t%s\t%s\t📄 %s  \033[2m%s\033[0m\n",$2,$3,$2,$3 }'
+            } | fzf "${FZF_BASE[@]}" --ansi --delimiter=$'\t' --with-nth=4 --prompt "SD:$dir > " \
+                  --header "Enter = open · Esc = back")" || return 0
+    IFS=$'\t' read -r t name size _ <<<"$sel"
+    case "$t" in
+      U) dir="$(parent "$dir")" ;;
+      D) dir="$(join_path "$dir" "$name")" ;;
+      F) file_menu "$(join_path "$dir" "$name")" "$size" ;;
+      N) read -rp "New folder name: " name; [[ -n $name ]] && remote_mkdir "$(join_path "$dir" "$name")" >/dev/null ;;
+      P) local files f; mapfile -t files < <(pick_local)
+         for f in "${files[@]}"; do put_file "$f" "$dir" || break; done
+         (( ${#files[@]} )) && pause ;;
+      G) local to="$SD_COPY${dir%/}"
+         say "Downloading $dir → $(pretty "${to:-$SD_COPY}")"
+         get_dir "$dir" "${to:-$SD_COPY}" && ok "Done"; pause ;;
+    esac
+  done
+}
+
+boot_menu() {
+  local sel
+  sel="$(list_apps | fzf "${FZF_BASE[@]}" --delimiter=$'\t' --with-nth=2 --prompt "boot > " --header "Reboot the Cardputer into…")" || return 0
+  boot_app "${sel%%$'\t'*}"; pause
+}
+
+settings_menu() {
+  local c
+  c="$(printf '%s\n' "🔎 Find the Cardputer again" "🔑 Change the WebUI login cardkey uses" "📍 Set its IP by hand" |
+       fzf "${FZF_BASE[@]}" --prompt "settings > " --header "Now: $HOST  (login: $USERNAME)")" || return 0
+  case "$c" in
+    *Find*)  HOST=""; _READY=0; connect && ok "Found it at $HOST"; pause ;;
+    *login*) read -rp "Usr: " USERNAME; read -rsp "Pwd: " PASSWORD; echo; save_conf; login && ok "Logged in"; pause ;;
+    *IP*)    read -rp "IP shown on the Cardputer: " HOST; save_conf; probe "$HOST" && ok "Cardputer answers at $HOST" || err "Nothing answering at $HOST"; pause ;;
+  esac
+}
+
+main_menu() {
+  need curl fzf
+  ready || return 1
+  local c header
+  while :; do
+    header="$(status_line)"
+    c="$(printf '%s\n' \
+        "📂 Browse the SD card" \
+        "📤 Send files to the SD card" \
+        "⚡ Send firmware & install it" \
+        "🔁 Boot an installed app" \
+        "📶 Save a Wi-Fi network on it" \
+        "💾 Back up its settings (NVS)" \
+        "ℹ  SD card & system info" \
+        "🔄 Reboot the Cardputer" \
+        "⚙  Connection settings" |
+        fzf "${FZF_BASE[@]}" --prompt "cardkey > " --header "$header")" || return 0
+    case "$c" in
+      *Browse*)   browse_menu / ;;
+      *"Send files"*) send_files_menu ;;
+      *firmware*) flash_menu ;;
+      *Boot*)     boot_menu ;;
+      *network*)  save_wifi; pause ;;
+      *Back*)     backup_nvs; pause ;;
+      *info*)     show_info; pause ;;
+      *Reboot*)   confirm "Reboot the Cardputer?" && req /reboot && ok "Rebooting — the WebUI will close."; pause ;;
+      *Connection*) settings_menu ;;
+    esac
+  done
+}
+
+# ── self-install ─────────────────────────────────────────────
+self_install() {
+  local here dest="$HOME/bin/cardkey"
+  here="$(readlink -f "${BASH_SOURCE[0]}")"
+  mkdir -p "$HOME/bin" "$FW_DIR" "$SD_COPY" "$NVS_DIR"
+  [[ $here != "$(readlink -f "$dest" 2>/dev/null)" ]] && cp -f -- "$here" "$dest"
+  sed -i 's/\r$//' "$dest"; chmod 755 "$dest"
+  need curl fzf
+  ok "Installed: cardkey  (~/bin/cardkey)"
+}
+
+usage() {
+  cat <<EOF
+${B}cardkey $VERSION${N} — your Cardputer from Termux, over Wi-Fi
+On the Cardputer first: ${B}Launcher → WebUI${N}
+
+  cardkey                     menu
+  cardkey info                SD card space, Launcher version, installed apps
+  cardkey ls [DIR]            list a folder on the SD card
+  cardkey get PATH [LOCAL]    copy a file or folder to the phone (~/cardputer/sd)
+  cardkey put FILE… [--to DIR]   send files to the SD card (default: /)
+  cardkey flash FILE.bin      send firmware and install it
+  cardkey install SDPATH      install a .bin that's already on the SD card
+  cardkey mkdir DIR | rm PATH | mv PATH NEWNAME
+  cardkey boot [LABEL]        reboot into an installed app
+  cardkey wifi [SSID]         save a Wi-Fi network on the Cardputer
+  cardkey nvs                 back up its settings to ~/cardputer/nvs
+  cardkey reboot
+  cardkey host [IP]           show / set where it is (blank = search again)
+  cardkey login               change the WebUI login cardkey uses
+EOF
+}
+
+# ── main ─────────────────────────────────────────────────────
+cmd="${1:-menu}"; shift || true
+case "$cmd" in
+  menu)        main_menu ;;
+  info)        show_info ;;
+  ls)          dir="${1:-/}"; [[ $dir == /* ]] || dir="/$dir"; ready || exit 1
+               listing="$(remote_ls "$dir")" || exit 1
+               say "${B}$dir${N}"
+               [[ -z $listing ]] && say "  ${D}(empty)${N}"
+               while IFS=$'\t' read -r t name size; do
+                 [[ -z $t ]] && continue
+                 if [[ $t == D ]]; then say "  ${C}$name/${N}"; else printf '  %-40s %s\n' "$name" "${D}$size${N}"; fi
+               done <<<"$listing" ;;
+  get)         [[ -n ${1:-} ]] || { usage; exit 1; }
+               src="${1%/}"; [[ $src == /* ]] || src="/$src"; ready || exit 1
+               if [[ -z $src || $src == / ]]; then kind=D; src=/
+               else kind="$(remote_ls "$(parent "$src")" | awk -F'\t' -v n="${src##*/}" '$2==n{print $1; exit}')"; fi
+               to="${2:-$SD_COPY${src%/}}"
+               case "$kind" in
+                 D) say "Downloading folder $src → $(pretty "${to:-$SD_COPY}")"
+                    get_dir "$src" "${to:-$SD_COPY}" && ok "Done" ;;
+                 F) [[ -d $to ]] && to="$to/${src##*/}"
+                    get_file "$src" "$to" && ok "Saved to $(pretty "$to")" ;;
+                 *) err "Not on the SD card: $src"; exit 1 ;;
+               esac ;;
+  put|send)    files=() dest="/"
+               while (( $# )); do
+                 case "$1" in --to) dest="${2:-/}"; shift 2 ;; *) files+=("$1"); shift ;; esac
+               done
+               (( ${#files[@]} )) || { usage; exit 1; }
+               for f in "${files[@]}"; do put_file "$f" "$dest" || exit 1; done ;;
+  flash)       [[ -n ${1:-} ]] || { usage; exit 1; }; flash "$1" ;;
+  install)     [[ -n ${1:-} ]] || { usage; exit 1; }; install_from_sd "$1" ;;
+  mkdir)       [[ -n ${1:-} ]] || { usage; exit 1; }; remote_mkdir "$1" && ok "Created $1" ;;
+  rm|del)      [[ -n ${1:-} ]] || { usage; exit 1; }; remote_rm "$1" && ok "Deleted $1" ;;
+  mv|rename)   [[ -n ${2:-} ]] || { usage; exit 1; }; remote_mv "$1" "$2" && ok "Renamed to $2" ;;
+  boot)        if [[ -n ${1:-} ]]; then boot_app "$1"
+               else need fzf; ready && boot_menu; fi ;;
+  wifi)        ready && save_wifi "${1:-}" ;;
+  nvs|backup)  backup_nvs ;;
+  reboot)      req /reboot && ok "Rebooting — the WebUI will close." ;;
+  host)        need curl
+               if [[ -n ${1:-} ]]; then HOST="$1"; save_conf
+                 if probe "$HOST"; then ok "Cardputer answers at $HOST"; else err "Nothing answering at $HOST yet (saved anyway)"; fi
+               else
+                 HOST=""; connect && ok "Cardputer is at $HOST"
+               fi ;;
+  login)       need curl; connect || exit 1
+               read -rp "Usr [$USERNAME]: " u; USERNAME="${u:-$USERNAME}"
+               read -rsp "Pwd: " PASSWORD; echo; save_conf
+               login && ok "Logged in" ;;
+  install-self|setup) self_install ;;
+  help|-h|--help) usage ;;
+  version|--version) echo "cardkey $VERSION" ;;
+  *)           err "Unknown command: $cmd"; usage; exit 1 ;;
+esac

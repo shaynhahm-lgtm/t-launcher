@@ -1,6 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# Termux Launcher v4
+# Termux Launcher v5
 # Color-coded file browser with smart run/view actions.
+#  - Add-ons menu: dropwatch, cardkey, netkey, offset, tdoctor (install on first pick)
 #  - Enter opens any file with the right thing (via topen); Tab = action menu
 #  - 10 file managers one tap away, installed for you with fmget
 #  - Dirs listed first, live preview pane (Ctrl+P hides/shows it)
@@ -321,10 +322,59 @@ options_menu() {
   (cd "$(current_dir)" && "$fm") || msg "$fm exited with an error."
 }
 
+# ---------- Add-ons: extra tools, installed on first pick ----------
+ADDONS="dropwatch cardkey netkey offset tdoctor"
+ADDON_RAW="https://raw.githubusercontent.com/shaynhahm-lgtm/t-launcher/${T_BRANCH:-main}/addons"
+
+addon_desc() {
+  case "$1" in
+    dropwatch) echo "auto-handles new downloads" ;;
+    cardkey)   echo "Cardputer over Wi-Fi" ;;
+    netkey)    echo "what's on your Wi-Fi" ;;
+    offset)    echo "pipe offset & grade math" ;;
+    tdoctor)   echo "check & fix Termux" ;;
+  esac
+}
+
+get_addon() { # downloads an add-on into ~/bin (they expect to live there)
+  local a="$1" tmp
+  mkdir -p "$HOME/bin"; tmp="$HOME/bin/.$a.part"
+  echo "Installing $a..."
+  curl -fsSL "$ADDON_RAW/$a" -o "$tmp" && mv -f "$tmp" "$HOME/bin/$a" && chmod +x "$HOME/bin/$a" \
+    || { rm -f "$tmp"; return 1; }
+  case ":$PATH:" in *":$HOME/bin:"*) ;; *) export PATH="$HOME/bin:$PATH" ;; esac
+  [ "$a" = dropwatch ] && "$HOME/bin/dropwatch" install
+  hash -r
+}
+
+addons_menu() {
+  local a choice
+  while true; do
+    local -a rows=()
+    for a in $ADDONS; do
+      if need "$a"; then rows+=("✓ $a  - $(addon_desc "$a")")
+      else rows+=("  $a  - $(addon_desc "$a")  (Enter installs it)"); fi
+    done
+    rows+=("Install all add-ons" "Back")
+    choice="$(pick "Add-ons   ✓ = installed" "${rows[@]}")" || return
+    case "$choice" in
+      Back) return ;;
+      "Install all add-ons")
+        for a in $ADDONS; do need "$a" || get_addon "$a" || echo "Install of $a failed."; done
+        msg "\nDone."; continue ;;
+    esac
+    a="$(awk '{print ($1=="✓") ? $2 : $1}' <<<"$choice")"
+    if ! need "$a"; then get_addon "$a" || { msg "Install of $a failed."; continue; }; fi
+    (cd "$(current_dir)" && "$a")
+    msg ""
+  done
+}
+
 main_menu() {
   local hid choice
   [ "$SHOW_HIDDEN" = 1 ] && hid="Hide hidden files" || hid="Show hidden files"
   local -a items=()
+  items+=("Add-ons (dropwatch, cardkey, netkey, offset, tdoctor)")
   need pkgkey && items+=("Packages (pkgkey)")
   need fkey   && items+=("File types (fkey)")
   [ -d "$HOME/bin" ]       && items+=("My tools (~/bin)")
@@ -337,6 +387,7 @@ main_menu() {
   items+=("Back")
   choice="$(pick "Menu" "${items[@]}")" || return
   case "$choice" in
+    "Add-ons"*)           addons_menu ;;
     "Packages (pkgkey)")  pkgkey_menu ;;
     "File types (fkey)")
       local x; read -r -e -p "Extension or filename (e.g. apk, tar.gz): " x
