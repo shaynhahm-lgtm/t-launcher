@@ -1,0 +1,242 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# clipkey — clipboard history for Termux
+#
+#   clipkey                     pick a past clip and copy it back
+#   clipkey WORDS               open the picker already filtered
+#   clipkey add [TEXT]          save TEXT, piped input, or the current clipboard
+#   clipkey start|stop|status   background watcher (starts with your shell)
+#   clipkey clear               wipe the history
+#   clipkey setup               start the watcher with every new session
+#   clipkey uninstall           stop it and remove it from your shell startup
+#
+# Picker keys:  enter = copy   ctrl-p = print to terminal   ctrl-d = delete
+# Settings:     CLIPKEY_MAX (clips kept, default 300)
+#               CLIPKEY_POLL (seconds between checks, default 3)
+
+set -u
+
+DATA="${CLIPKEY_DIR:-$HOME/.local/share/clipkey}"
+CLIPS="$DATA/clips"
+PIDF="$DATA/watcher.pid"
+MAX="${CLIPKEY_MAX:-300}"
+POLL="${CLIPKEY_POLL:-3}"
+SELF=$(readlink -f "${BASH_SOURCE[0]}")
+G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; D=$'\e[2m'; N=$'\e[0m'
+
+mkdir -p "$CLIPS"
+
+die() { echo "${R}clipkey:${N} $*" >&2; exit 1; }
+
+need_api() {
+  command -v termux-clipboard-get >/dev/null 2>&1 && return 0
+  if [[ -t 0 ]] && command -v pkg >/dev/null 2>&1; then
+    echo "Installing termux-api…"; pkg install -y termux-api
+  fi
+  command -v termux-clipboard-get >/dev/null 2>&1 ||
+    die "termux-api missing — run: pkg install termux-api"
+}
+
+get_clip() { timeout 6 termux-clipboard-get 2>/dev/null; }
+set_clip() { timeout 6 termux-clipboard-set 2>/dev/null; }
+
+count() {
+  local f n=0
+  for f in "$CLIPS"/*; do [[ -e $f ]] && n=$((n + 1)); done
+  echo "$n"
+}
+
+# Clip files are named <epoch-nanoseconds>-<hash>, so name order = time order.
+prune() {
+  local -a files
+  mapfile -t files < <(ls -1 "$CLIPS")
+  local extra=$(( ${#files[@]} - MAX )) i
+  for (( i = 0; i < extra; i++ )); do rm -f "$CLIPS/${files[i]}"; done
+}
+
+# Save stdin as a clip. Copying the same text again just moves it to the top.
+save_clip() {
+  local tmp hash
+  tmp=$(mktemp "$DATA/.new.XXXXXX") || return 1
+  cat > "$tmp"
+  if ! grep -q '[^[:space:]]' "$tmp"; then rm -f "$tmp"; return 1; fi
+  hash=$(sha1sum < "$tmp"); hash=${hash:0:12}
+  rm -f "$CLIPS"/*-"$hash"
+  mv "$tmp" "$CLIPS/$(date +%s%N)-$hash"
+  prune
+}
+
+# One line per clip, newest first:  <file> TAB <age> TAB <preview>
+list() {
+  local now f d age line first lines
+  now=$(date +%s)
+  while IFS= read -r f; do
+    d=$(( now - 10#${f:0:10} ))
+    if   (( d < 60 ));    then age="${d}s"
+    elif (( d < 3600 ));  then age="$(( d / 60 ))m"
+    elif (( d < 86400 )); then age="$(( d / 3600 ))h"
+    else                       age="$(( d / 86400 ))d"
+    fi
+    first=""; lines=0
+    while IFS= read -r line || [[ -n $line ]]; do
+      lines=$((lines + 1))
+      [[ -z ${first//[[:space:]]/} ]] && first=$line
+      (( lines > 1 )) && [[ -n ${first//[[:space:]]/} ]] && break
+    done < "$CLIPS/$f"
+    first=${first//$'\t'/ }
+    first=${first#"${first%%[![:space:]]*}"}
+    first=${first:0:80}
+    (( lines > 1 )) && first="$first ↵"
+    printf '%s\t%4s  \t%s\n' "$f" "$age" "$first"
+  done < <(ls -1r "$CLIPS")
+}
+
+pick() {
+  command -v fzf >/dev/null 2>&1 || die "fzf missing — run: pkg install fzf"
+  if [[ $(count) == 0 ]]; then
+    echo "No clips yet — copy something first."
+    running || echo "${D}(the watcher is off — run: clipkey start)${N}"
+    return 0
+  fi
+  local out key f
+  out=$(list | fzf --delimiter=$'\t' --with-nth=2.. --layout=reverse \
+      --tiebreak=index --query="${1:-}" --prompt='clip> ' \
+      --header='enter copy · ctrl-p print · ctrl-d delete' \
+      --preview="cat '$CLIPS'/{1}" --preview-window='down,40%,wrap' \
+      --bind="ctrl-d:execute-silent(rm -f '$CLIPS'/{1})+reload(bash '$SELF' _list)" \
+      --expect=ctrl-p) || return 0
+  key=${out%%$'\n'*}
+  f=${out#*$'\n'}; f=${f%%$'\t'*}
+  [[ -n $f && -f $CLIPS/$f ]] || return 0
+  if [[ $key == ctrl-p ]]; then
+    cat "$CLIPS/$f"; echo
+  else
+    need_api
+    set_clip < "$CLIPS/$f" ||
+      die "couldn't set the clipboard — is the Termux:API app installed?"
+    mv "$CLIPS/$f" "$CLIPS/$(date +%s%N)-${f#*-}"   # bump to the top
+    echo "${G}✓ copied${N}"
+  fi
+}
+
+running() {
+  local p
+  p=$(cat "$PIDF" 2>/dev/null) || return 1
+  [[ -n $p ]] && kill -0 "$p" 2>/dev/null &&
+    grep -q clipkey "/proc/$p/cmdline" 2>/dev/null
+}
+
+start() {
+  local quiet=""; [[ ${1:-} == -q ]] && quiet=1
+  if running; then
+    [[ $quiet ]] || echo "${G}●${N} watcher already running"
+    return 0
+  fi
+  if [[ $quiet ]]; then
+    command -v termux-clipboard-get >/dev/null 2>&1 || return 0  # stay silent at shell startup
+  else
+    need_api
+  fi
+  nohup bash "$SELF" _watch >/dev/null 2>&1 &
+  echo $! > "$PIDF"
+  [[ $quiet ]] || echo "${G}●${N} watcher started — anything you copy now gets saved"
+}
+
+stop() {
+  if running; then
+    local p; p=$(cat "$PIDF")
+    kill "$p" 2>/dev/null
+    pkill -P "$p" 2>/dev/null   # wake it from sleep so it exits right away
+    rm -f "$PIDF"
+    echo "watcher stopped"
+  else
+    rm -f "$PIDF"
+    echo "watcher isn't running"
+  fi
+}
+
+watch_loop() {
+  trap 'rm -f "$PIDF"; exit 0' TERM INT
+  local clip prev=""
+  while :; do
+    clip=$(get_clip)
+    if [[ -n ${clip//[[:space:]]/} ]]; then
+      [[ $clip != "$prev" ]] && printf '%s' "$clip" | save_clip
+      prev=$clip
+      sleep "$POLL"
+    else
+      # Android hides the clipboard while Termux is in the background,
+      # so check less often until it comes back.
+      sleep $(( POLL * 3 ))
+    fi
+  done
+}
+
+add() {
+  if (( $# )); then
+    printf '%s' "$*" | save_clip
+  elif [[ ! -t 0 ]]; then
+    save_clip
+  else
+    need_api; get_clip | save_clip
+  fi && echo "${G}✓ saved${N}" || echo "${Y}nothing to save${N}"
+}
+
+status() {
+  if running; then
+    echo "${G}●${N} watcher on · $(count) clips · checks every ${POLL}s"
+  else
+    echo "${Y}○${N} watcher off · $(count) clips   ${D}(clipkey start)${N}"
+  fi
+}
+
+wipe() {
+  local a
+  read -rp "Delete all $(count) clips? [y/N] " a
+  [[ $a == [yY]* ]] || { echo "kept"; return 0; }
+  rm -f "$CLIPS"/*
+  echo "history cleared"
+}
+
+setup() {
+  need_api
+  local rc hook
+  hook="[ -x \"$SELF\" ] && \"$SELF\" start -q   # clipboard watcher"
+  local -a rcs=()
+  [[ -f $HOME/.zshrc ]] && rcs+=("$HOME/.zshrc")
+  [[ -f $HOME/.bashrc ]] && rcs+=("$HOME/.bashrc")
+  (( ${#rcs[@]} )) || { touch "$HOME/.bashrc"; rcs=("$HOME/.bashrc"); }
+  for rc in "${rcs[@]}"; do
+    grep -qE 'clipkey"? start' "$rc" || echo "$hook" >> "$rc"
+  done
+  if ! timeout 8 termux-clipboard-get >/dev/null 2>&1; then
+    echo "${Y}!${N} The Termux:API app didn't answer. Install it from the same place you"
+    echo "  got Termux, open it once, then run: clipkey start"
+  fi
+  start
+}
+
+uninstall() {
+  stop >/dev/null
+  local rc
+  for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
+    [[ -f $rc ]] && sed -i -E '/clipkey"? start -q/d' "$rc"
+  done
+  echo "clipkey watcher stopped and removed from shell startup (history kept in $DATA)"
+}
+
+usage() { sed -n '2,/^$/s/^# \{0,1\}//p' "$SELF"; }
+
+case "${1:-}" in
+  "")              pick ;;
+  start)           start "${2:-}" ;;
+  stop)            stop ;;
+  status)          status ;;
+  add)             shift; add "$@" ;;
+  clear)           wipe ;;
+  setup)           setup ;;
+  uninstall)       uninstall ;;
+  _watch)          watch_loop ;;
+  _list)           list ;;
+  -h|--help|help)  usage ;;
+  *)               pick "$*" ;;
+esac

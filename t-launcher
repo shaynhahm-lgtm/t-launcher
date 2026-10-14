@@ -1,7 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# Termux Launcher v5
+# Termux Launcher v6
 # Color-coded file browser with smart run/view actions.
-#  - Add-ons menu: dropwatch, cardkey, netkey, offset, tdoctor (install on first pick)
+#  - Add-ons menu: dropwatch, cardkey, netkey, offset, tdoctor, clipkey, talk (install on first pick)
 #  - Enter opens any file with the right thing (via topen); Tab = action menu
 #  - 10 file managers one tap away, installed for you with fmget
 #  - Dirs listed first, live preview pane (Ctrl+P hides/shows it)
@@ -323,7 +323,7 @@ options_menu() {
 }
 
 # ---------- Add-ons: extra tools, installed on first pick ----------
-ADDONS="dropwatch cardkey netkey offset tdoctor"
+ADDONS="dropwatch cardkey netkey offset tdoctor clipkey talk"
 ADDON_RAW="https://raw.githubusercontent.com/shaynhahm-lgtm/t-launcher/${T_BRANCH:-main}/addons"
 
 addon_desc() {
@@ -333,6 +333,8 @@ addon_desc() {
     netkey)    echo "what's on your Wi-Fi" ;;
     offset)    echo "pipe offset & grade math" ;;
     tdoctor)   echo "check & fix Termux" ;;
+    clipkey)   echo "clipboard history" ;;
+    talk)      echo "voice commands" ;;
   esac
 }
 
@@ -344,6 +346,7 @@ get_addon() { # downloads an add-on into ~/bin (they expect to live there)
     || { rm -f "$tmp"; return 1; }
   case ":$PATH:" in *":$HOME/bin:"*) ;; *) export PATH="$HOME/bin:$PATH" ;; esac
   [ "$a" = dropwatch ] && "$HOME/bin/dropwatch" install
+  [ "$a" = clipkey ] && "$HOME/bin/clipkey" setup
   hash -r
 }
 
@@ -374,7 +377,7 @@ main_menu() {
   local hid choice
   [ "$SHOW_HIDDEN" = 1 ] && hid="Hide hidden files" || hid="Show hidden files"
   local -a items=()
-  items+=("Add-ons (dropwatch, cardkey, netkey, offset, tdoctor)")
+  items+=("Add-ons (dropwatch, cardkey, netkey, offset, tdoctor, clipkey, talk)")
   need pkgkey && items+=("Packages (pkgkey)")
   need fkey   && items+=("File types (fkey)")
   [ -d "$HOME/bin" ]       && items+=("My tools (~/bin)")

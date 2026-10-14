@@ -6,10 +6,11 @@
 #   bash install.sh --uninstall          remove everything
 RAW="https://raw.githubusercontent.com/shaynhahm-lgtm/t-launcher/${T_BRANCH:-main}"
 TOOLS="t-launcher pkgkey fkey topen fmget"
-ADDONS="dropwatch cardkey netkey offset tdoctor"   # these live in ~/bin
+ADDONS="dropwatch cardkey netkey offset tdoctor clipkey talk"   # these live in ~/bin
 if [ "${1:-}" = "--uninstall" ]; then
   for t in $TOOLS; do rm -f "$PREFIX/bin/$t"; done
   [ -x "$HOME/bin/dropwatch" ] && "$HOME/bin/dropwatch" uninstall >/dev/null 2>&1
+  [ -x "$HOME/bin/clipkey" ] && "$HOME/bin/clipkey" uninstall >/dev/null 2>&1
   for a in $ADDONS; do rm -f "$HOME/bin/$a"; done
   echo "Removed: $TOOLS $ADDONS"; exit 0
 fi
@@ -43,6 +44,7 @@ if [ -n "$GOT" ]; then
        export PATH="$HOME/bin:$PATH" ;;
   esac
   case " $GOT " in *" dropwatch "*) "$HOME/bin/dropwatch" install ;; esac
+  case " $GOT " in *" clipkey "*) "$HOME/bin/clipkey" setup ;; esac
 fi
 # Older setups run t-launcher through a shell alias to a copy like ~/bin/termux-launcher.sh.
 # Update that copy too (backed up first) so the alias doesn't keep running the old version.
