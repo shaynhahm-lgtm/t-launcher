@@ -2,7 +2,7 @@
 
 **A color-coded file browser and command finder for Termux.**
 Browse your files, see what anything is, and open it with the right thing, all from one fuzzy-search menu.
-Comes with **topen** (open any file with the right tool), **fmget** (install the top 10 Termux file managers), **pkgkey** (what can my installed packages do?) and **fkey** (what is this file and how do I use it?), plus seven optional [add-ons](#add-ons).
+Comes with **topen** (open any file with the right tool), **fmget** (install the top 10 Termux file managers), **pkgkey** (what can my installed packages do?) and **fkey** (what is this file and how do I use it?), plus eight optional [add-ons](#add-ons).
 
 <img src="screenshots/1.jpg" width="260"> <img src="screenshots/2.jpg" width="260"> <img src="screenshots/3.jpg" width="260"> 
 
@@ -62,7 +62,7 @@ fmget -l             what's installed
 
 ## Add-ons
 
-Five extra tools, each one a single script in [`addons/`](addons). They install to `~/bin`, run on their own or from **MENU → Add-ons**, and install anything they need (nmap, curl, fzf...) the first time you use them.
+Eight extra tools, each one a single script in [`addons/`](addons). They install to `~/bin`, run on their own or from **MENU → Add-ons**, and install anything they need (nmap, curl, fzf...) the first time you use them.
 
 | Add-on | What it does |
 |---|---|
@@ -73,6 +73,7 @@ Five extra tools, each one a single script in [`addons/`](addons). They install 
 | **cardkey** | Runs an M5Stack Cardputer (with M5Launcher) from Termux over Wi-Fi: browse its SD card, send files, flash firmware, boot installed apps, save Wi-Fi networks, back up its settings. Finds the Cardputer on its own. |
 | **clipkey** | Clipboard history. Everything you copy while Termux is open gets saved; search it with fzf and copy any clip back. Starts with your shell. Needs Termux:API. |
 | **talk** | Voice commands. Say "launcher", "update" or "network" and it runs the tool. If it doesn't understand, pick the command and it learns that phrase. Needs Termux:API. |
+| **sukey** | Near-root without unlocking the bootloader (no Knox trip). Uses [Shizuku](https://github.com/thedjchi/Shizuku) to give Termux ADB-level shell access, then: stop Android killing Termux (phantom process killer), remove or freeze bloat (reversible), grant app permissions, system-wide ad-blocking DNS, hidden settings editor, APK installs with downgrades, full logcat. Setup pulls `rish` out of the Shizuku app for you; you just pair Shizuku once over Wireless debugging. |
 
 ```
 dropwatch                    status · start | stop · undo · history · rules
@@ -82,6 +83,7 @@ offset 2.4                   every common bend for a 2.4 ft offset · offset hel
 cardkey                      menu · ls · get · put · flash · boot · wifi · nvs
 clipkey                      pick a clip · clipkey <words> · add · start | stop · clear
 talk                         listen once · talk loop · talk <words> · add · list · edit
+sukey                        menu · setup · start · sh · debloat · restore · freeze · keepalive · adblock on · history
 ```
 
 Optional extras dropwatch uses if you have them: `apkscan` for APKs and `appdrop` for AppImages. `termux-api` (plus the Termux:API app) turns on notifications and Wi-Fi details.
@@ -100,7 +102,7 @@ Anything a file needs that isn't installed (python, unzip, 7z, java...) gets ins
 curl -fsSL https://raw.githubusercontent.com/shaynhahm-lgtm/t-launcher/main/install.sh | bash -s -- --uninstall
 ```
 
-That removes the add-ons too.
+That removes the add-ons too. (Anything sukey changed on the phone stays; undo it first with `sukey restore`, `sukey unfreeze`, `sukey adblock off`.)
 
 ## License
 

@@ -1,0 +1,749 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────
+#  sukey — near-root toolkit for Termux, powered by Shizuku
+#
+#  Gives Termux shell-level (ADB, uid 2000) privileges on a phone with
+#  a locked bootloader. No root, no Knox trip, no PC needed.
+#
+#  Install: t-launcher → MENU → Add-ons → sukey, or run it straight
+#  from your Download folder:
+#      bash /storage/emulated/0/Download/sukey setup
+#  After that:
+#      sukey          → menu (offers setup on first run)
+#      sukey help     → every command
+# ─────────────────────────────────────────────────────────────────────
+
+set -o pipefail
+shopt -u patsub_replacement 2>/dev/null || true
+
+VERSION="1.0"
+SHIZUKU_PKG="moe.shizuku.privileged.api"
+FORK_URL="https://github.com/thedjchi/Shizuku/releases"
+PLAY_URL="https://play.google.com/store/apps/details?id=moe.shizuku.privileged.api"
+ADBLOCK_DNS="dns.adguard-dns.com"
+
+SUKEY_HOME="${SUKEY_HOME:-$HOME/.local/share/sukey}"
+RISH="$SUKEY_HOME/rish"
+DEX="$SUKEY_HOME/rish_shizuku.dex"
+LOG="$SUKEY_HOME/history.log"
+BIN="${SUKEY_BIN:-$HOME/bin}"
+SHARED="${SUKEY_SHARED:-/storage/emulated/0}"
+STAGE="$SHARED/Download/.sukey"
+export RISH_APPLICATION_ID=com.termux
+
+# ── Known bloat (only ones actually installed are shown; nothing is removed
+#    unless you select it). Format: package|description
+SAFE_LIST=(
+  "com.aura.oobe.samsung.gl|AppCloud — pushes sponsored app installs"
+  "com.aura.oobe.samsung|AppCloud (older build)"
+  "com.LogiaGroup.LogiaDeck|DT Ignite — carrier silent app installer"
+  "com.dti.att|AT&T App Select installer"
+  "com.facebook.appmanager|Facebook App Manager (preload)"
+  "com.facebook.services|Facebook Services (preload)"
+  "com.facebook.system|Facebook App Installer (preload)"
+  "com.facebook.katana|Facebook app"
+  "com.netflix.partner.activation|Netflix preload stub"
+  "com.microsoft.skydrive|OneDrive"
+  "com.linkedin.android|LinkedIn"
+  "com.samsung.android.app.spage|Samsung Free / Daily feed"
+  "com.samsung.android.tvplus|Samsung TV Plus"
+  "com.samsung.android.app.tips|Samsung Tips"
+  "com.samsung.android.kidsinstaller|Samsung Kids"
+  "com.samsung.android.arzone|AR Zone"
+  "com.samsung.android.aremoji|AR Emoji"
+  "com.samsung.android.aremojieditor|AR Emoji Editor"
+  "com.samsung.android.bixby.agent|Bixby Voice"
+  "com.samsung.android.bixby.wakeup|Bixby wake-up"
+  "com.samsung.android.game.gamehome|Game Launcher"
+  "com.samsung.android.smartswitchassistant|Smart Switch agent"
+  "com.samsung.android.app.watchmanagerstub|Galaxy Wearable stub (keep if you use a Galaxy Watch)"
+  "com.google.android.apps.tachyon|Google Meet"
+  "com.google.android.videos|Google TV"
+  "com.vzw.hss.myverizon|My Verizon"
+  "com.vcast.mediamanager|Verizon Cloud"
+  "com.verizon.messaging.vzmsgs|Verizon Message+"
+  "com.tmobile.pr.mytmobile|T-Mobile / T-Life"
+  "com.tmobile.tuesdays|T-Mobile Tuesdays"
+  "com.att.myWireless|myAT&T"
+  "com.att.callprotect|AT&T Call Protect"
+)
+
+# ── Packages that can break calls, boot, the UI, updates or this toolkit.
+#    Blocked from removal/freezing unless you pass --force.
+DENY_RE='^(android'
+DENY_RE+='|com\.android\.(systemui|phone|settings|shell|vending|bluetooth|nfc|se|keychain|externalstorage|mtp|server\..*|permissioncontroller|packageinstaller|providers\..*|networkstack.*|wifi.*|location.*|inputmethod.*|ons|carrierconfig|cellbroadcast.*|webview)'
+DENY_RE+='|com\.google\.android\.(gms.*|gsf.*|permissioncontroller|packageinstaller|networkstack.*|ext\..*|modulemetadata|inputmethod.*|setupwizard|webview|trichromelibrary|apps\.restore)'
+DENY_RE+='|com\.samsung\.android\.(providers\..*|incallui|dialer|honeyboard|kgclient|knox\..*|biometrics.*|authfw|securitylogagent|ims.*|app\.telephonyui|server\..*|svcagent|location|networkstack.*|wifi.*|bluetooth.*)'
+DENY_RE+='|com\.sec\.android\.(app\.launcher|app\.SecSetupWizard|provider\..*|soagent|app\.servicemodeapp|app\.factorykeystring)'
+DENY_RE+='|com\.sec\.ims.*|com\.sec\.imsservice|com\.sec\.epdg|com\.wssyncmldm|com\.qualcomm\..*|com\.qti\..*|vendor\..*'
+DENY_RE+='|com\.termux.*|moe\.shizuku\..*)$'
+
+PERMS=(
+  "WRITE_SECURE_SETTINGS|Change secure/global settings (automation apps)"
+  "WRITE_SETTINGS|Change system settings"
+  "SYSTEM_ALERT_WINDOW|Draw over other apps"
+  "MANAGE_EXTERNAL_STORAGE|All-files access"
+  "REQUEST_INSTALL_PACKAGES|Install unknown apps"
+  "PACKAGE_USAGE_STATS|See app usage (screen-time apps)"
+  "DUMP|Read system diagnostics (dumpsys)"
+  "READ_LOGS|Read every app's logs"
+)
+
+# ── Output helpers ───────────────────────────────────────────────────────
+if [ -t 1 ]; then
+  R=$'\e[31m' G=$'\e[32m' Y=$'\e[33m' C=$'\e[36m' M=$'\e[35m' D=$'\e[2m' W=$'\e[1m' N=$'\e[0m'
+else
+  R='' G='' Y='' C='' M='' D='' W='' N=''
+fi
+ok()   { printf '%s✔%s %s\n' "$G" "$N" "$*"; }
+warn() { printf '%s!%s %s\n' "$Y" "$N" "$*" >&2; }
+err()  { printf '%s✘%s %s\n' "$R" "$N" "$*" >&2; }
+info() { printf '%s›%s %s\n' "$C" "$N" "$*"; }
+step() { printf '\n%s%s── %s ──%s\n' "$W" "$M" "$*" "$N"; }
+die()  { err "$*"; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+row()  { printf '  %-18s %s\n' "$1" "$2"; }
+logact() { mkdir -p "$SUKEY_HOME"; printf '%s  %s\n' "$(date '+%F %T')" "$*" >>"$LOG"; }
+
+confirm() { # confirm "question" [y|n default]
+  [ -n "$SUKEY_YES" ] && return 0
+  local def=${2:-n} hint a
+  [ "$def" = y ] && hint='[Y/n]' || hint='[y/N]'
+  read -r -p "${Y}?${N} $1 $hint " a </dev/tty || return 1
+  [[ ${a:-$def} =~ ^[Yy] ]]
+}
+
+valid_pkg() { [[ $1 =~ ^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$ ]]; }
+guarded()   { [[ $1 =~ $DENY_RE ]] && [ -z "$SUKEY_FORCE" ]; }
+shq()       { local s=${1//\'/\'\\\'\'}; printf "'%s'" "$s"; }   # quote for the remote sh
+
+open_url() { if have termux-open-url; then termux-open-url "$1"; else info "Open: $1"; fi; }
+open_shizuku() {
+  am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER \
+     -p "$SHIZUKU_PKG" >/dev/null 2>&1 || info "Open the Shizuku app."
+}
+
+# ── Pickers (fzf if present, numbered list otherwise) ────────────────────
+_list_items() {
+  local i
+  for i in "${!_items[@]}"; do
+    printf '%s%3d)%s %s\n' "$C" $((i + 1)) "$N" "${_items[$i]//$'\t'/   }" >/dev/tty
+  done
+}
+pick_one() { # stdin: lines → stdout: chosen line
+  if have fzf; then
+    fzf --ansi --reverse --height=90% --tabstop=20 --prompt='sukey› ' --header="$1"
+    return
+  fi
+  local _items n
+  mapfile -t _items
+  [ ${#_items[@]} -gt 0 ] || return 1
+  printf '%s%s%s\n' "$W" "$1" "$N" >/dev/tty
+  _list_items
+  read -r -p "Number: " n </dev/tty || return 1
+  [[ $n =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ] && [ "$n" -le ${#_items[@]} ] && printf '%s\n' "${_items[$((n - 1))]}"
+}
+pick_multi() { # stdin: lines → stdout: chosen lines
+  if have fzf; then
+    fzf --multi --ansi --reverse --height=90% --tabstop=44 --prompt='sukey› ' \
+        --bind 'ctrl-a:select-all' --header="$1"
+    return
+  fi
+  local _items choice i
+  mapfile -t _items
+  [ ${#_items[@]} -gt 0 ] || return 1
+  printf '%s%s%s\n' "$W" "$1" "$N" >/dev/tty
+  _list_items
+  read -r -p "Numbers (space-separated, a = all): " choice </dev/tty || return 1
+  if [ "$choice" = a ]; then printf '%s\n' "${_items[@]}"; return; fi
+  for i in $choice; do
+    [[ $i =~ ^[0-9]+$ ]] && [ "$i" -ge 1 ] && [ "$i" -le ${#_items[@]} ] && printf '%s\n' "${_items[$((i - 1))]}"
+  done
+}
+
+# ── Privileged shell plumbing ────────────────────────────────────────────
+rish_ok() { [ -x "$RISH" ] && [ -f "$DEX" ]; }
+
+priv() { # run a command string as uid 2000 (non-interactive)
+  rish_ok || die "rish isn't set up yet — run: sukey setup"
+  "$RISH" -c "$*" </dev/null
+}
+
+alive() { # is the privileged shell reachable? [timeout secs]
+  rish_ok || return 1
+  local out
+  out=$(timeout "${1:-12}" "$RISH" -c 'id -u' </dev/null 2>/dev/null | tail -n1 | tr -dc '0-9')
+  [ "$out" = 2000 ] || [ "$out" = 0 ]
+}
+
+need_alive() {
+  alive && return 0
+  err "Shizuku isn't running, or Termux isn't authorized in Shizuku."
+  info "Run: ${W}sukey start${N}"
+  exit 1
+}
+
+pkgs() { priv "pm list packages $*" 2>/dev/null | sed -n 's/^package://p' | tr -d '\r' | sort -u; }
+
+shizuku_apk() {
+  local l
+  l=$(pm path "$SHIZUKU_PKG" 2>/dev/null | sed -n 's/^package://p' | tr -d '\r')
+  [ -n "$l" ] || return 1
+  grep -m1 'base\.apk$' <<<"$l" || head -n1 <<<"$l"
+}
+
+wait_alive() { # [limit secs]
+  local limit=${1:-180} start=$SECONDS
+  printf '%s' "${D}Waiting for Shizuku (Ctrl-C to stop)${N}"
+  while (( SECONDS - start < limit )); do
+    if alive 8; then printf '\n'; ok "Shizuku is up — privileged shell ready."; return 0; fi
+    printf '.'
+    sleep 3
+  done
+  printf '\n'
+  return 1
+}
+
+start_help() {
+  cat <<EOF
+  ${W}To start Shizuku:${N}
+   1. Be on Wi-Fi (wireless debugging needs it)
+   2. Developer options › ${W}Wireless debugging${N} → on
+      (no Developer options? Settings › About phone › Software information ›
+       tap Build number 7 times)
+   3. First time only: Shizuku › ${W}Pair${N} › enter the code from the notification
+   4. Shizuku › ${W}Start${N}
+   5. If Shizuku asks whether Termux may use it › ${W}Allow${N}
+EOF
+}
+
+# ── rish install: pull it straight out of the Shizuku APK ────────────────
+_rish_from_apk() { # $1 = dest dir
+  local apk r d
+  apk=$(shizuku_apk) || return 1
+  [ -r "$apk" ] || return 1
+  have unzip || pkg install -y unzip >/dev/null 2>&1 || return 1
+  r=$(unzip -Z1 "$apk" 2>/dev/null | grep -E '(^|/)rish$' | head -n1)
+  d=$(unzip -Z1 "$apk" 2>/dev/null | grep -E '(^|/)rish_shizuku\.dex$' | head -n1)
+  [ -n "$r" ] && [ -n "$d" ] || return 1
+  unzip -p "$apk" "$r" >"$1/rish" && unzip -p "$apk" "$d" >"$1/rish_shizuku.dex"
+}
+
+_find_exported() {
+  find "$SHARED" -maxdepth 4 -type f -name rish_shizuku.dex -not -path '*/Android/*' 2>/dev/null | head -n1
+}
+
+_rish_from_export() { # $1 = dest dir — fallback: files exported from Shizuku's app
+  local hit start=$SECONDS
+  hit=$(_find_exported)
+  if [ -z "$hit" ]; then
+    warn "Couldn't pull rish out of the Shizuku app automatically."
+    info "In Shizuku: ${W}Use Shizuku in terminal apps › Export files${N} › choose your Download folder."
+    open_shizuku
+    printf '%s' "${D}Watching for the exported files${N}"
+    while [ -z "$hit" ] && (( SECONDS - start < 300 )); do
+      sleep 3; printf '.'; hit=$(_find_exported)
+    done
+    printf '\n'
+  fi
+  [ -n "$hit" ] && [ -f "$(dirname "$hit")/rish" ] || return 1
+  cp "$(dirname "$hit")/rish" "$1/rish" && cp "$hit" "$1/rish_shizuku.dex"
+}
+
+install_rish() {
+  mkdir -p "$SUKEY_HOME" "$BIN"
+  local tmp; tmp=$(mktemp -d)
+  if _rish_from_apk "$tmp"; then
+    ok "Extracted rish from the installed Shizuku app."
+  elif rish_ok; then
+    rm -rf "$tmp"; ok "Keeping the rish already installed."; return 0
+  elif _rish_from_export "$tmp"; then
+    ok "Picked up rish exported from Shizuku."
+  else
+    rm -rf "$tmp"; return 1
+  fi
+  # Point rish at Termux, and make the dex read-only (Android 14+ refuses writable dex)
+  sed 's/"PKG"/"com.termux"/' "$tmp/rish" >"$RISH"
+  chmod 700 "$RISH"
+  rm -f "$DEX"; cp "$tmp/rish_shizuku.dex" "$DEX"; chmod 400 "$DEX"
+  rm -rf "$tmp"
+  # Plain `rish` command too
+  if [ -f "$BIN/rish" ] && ! grep -q 'sukey' "$BIN/rish" 2>/dev/null; then
+    mv "$BIN/rish" "$BIN/rish.bak" && info "Backed up your old ~/bin/rish to rish.bak"
+  fi
+  printf '#!/data/data/com.termux/files/usr/bin/sh\n# installed by sukey\nexport RISH_APPLICATION_ID=com.termux\nexec "%s" "$@"\n' "$RISH" >"$BIN/rish"
+  chmod 755 "$BIN/rish"
+  ok "rish installed (also available as plain ${W}rish${N})."
+}
+
+self_install() {
+  local me
+  me=$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")
+  mkdir -p "$BIN"
+  if [ "$me" != "$(readlink -f "$BIN/sukey" 2>/dev/null)" ]; then
+    cp "$me" "$BIN/sukey" && chmod 755 "$BIN/sukey" && ok "Installed to ~/bin/sukey"
+  else
+    ok "sukey is in ~/bin"
+  fi
+  case ":$PATH:" in
+    *":$BIN:"*) ;;
+    *) warn "~/bin isn't on your PATH — add to your shell rc: export PATH=\"\$HOME/bin:\$PATH\"" ;;
+  esac
+}
+
+# ── Batch package operations ─────────────────────────────────────────────
+# batch <Verb> <remote command prefix> <success regex> <guard yes|no> pkg...
+batch() {
+  local verb=$1 cmd=$2 okre=$3 guard=$4; shift 4
+  local p list=() script="" out line
+  for p in "$@"; do
+    p=${p%%$'\t'*}; p=${p//[[:space:]]/}
+    [ -n "$p" ] || continue
+    valid_pkg "$p" || { warn "Skipping odd name: $p"; continue; }
+    if [ "$guard" = yes ] && guarded "$p"; then
+      warn "Protected (can break calls/boot/UI): $p — add --force to override"; continue
+    fi
+    list+=("$p")
+  done
+  [ ${#list[@]} -gt 0 ] || { info "Nothing to do."; return 0; }
+  printf '  %s\n' "${list[@]}"
+  confirm "$verb ${#list[@]} package(s)?" || { info "Cancelled."; return 0; }
+  for p in "${list[@]}"; do script+="printf '%s: ' $p; $cmd $p 2>&1; echo; "; done
+  out=$(priv "$script")
+  while IFS= read -r line; do
+    line=${line%$'\r'}
+    [ -n "$line" ] || continue
+    if [[ $line =~ $okre ]]; then ok "$line"; logact "$verb ${line%%:*}"; else warn "$line"; fi
+  done <<<"$out"
+}
+
+# ── Commands ─────────────────────────────────────────────────────────────
+cmd_setup() {
+  printf '%s%ssukey %s setup%s — near-root for Termux via Shizuku\n' "$W" "$M" "$VERSION" "$N"
+
+  step "1/5  Install sukey"
+  self_install
+
+  step "2/5  Shizuku app"
+  if shizuku_apk >/dev/null; then
+    ok "Shizuku is installed."
+  else
+    warn "Shizuku isn't installed (or Termux can't see it)."
+    printf '  %s1)%s thedjchi fork (GitHub) — adds reliable start-on-boot %s[recommended]%s\n' "$C" "$N" "$G" "$N"
+    printf '  %s2)%s Official Shizuku (Play Store)\n' "$C" "$N"
+    printf '  %s3)%s It is already installed — continue\n' "$C" "$N"
+    local c=1
+    [ -n "$SUKEY_YES" ] || read -r -p "Choice [1]: " c </dev/tty
+    case ${c:-1} in
+      1) open_url "$FORK_URL"; info "Grab the .apk under Assets on the newest release and install it." ;;
+      2) open_url "$PLAY_URL" ;;
+    esac
+    [ "${c:-1}" = 3 ] || [ -n "$SUKEY_YES" ] || read -r -p "Press Enter once Shizuku is installed… " _ </dev/tty
+  fi
+
+  step "3/5  rish (Shizuku's terminal bridge)"
+  install_rish || die "Couldn't install rish. Re-run sukey setup after exporting it from Shizuku."
+
+  step "4/5  Start Shizuku"
+  if alive; then
+    ok "Already running."
+  else
+    start_help
+    confirm "Open Shizuku now?" y && open_shizuku
+    wait_alive 300 || die "Timed out. Once Shizuku says it's running, run: sukey setup"
+  fi
+
+  step "5/5  Near-root tweaks"
+  do_keepalive
+  do_boot
+
+  step "Done"
+  cat <<EOF
+  ${W}sukey${N}              menu
+  ${W}sukey debloat${N}      strip carrier/Samsung bloat (reversible)
+  ${W}sukey adblock on${N}   system-wide ad blocking
+  ${W}sukey sh${N}           privileged shell
+  ${W}sukey help${N}         everything else
+EOF
+}
+
+cmd_start() {
+  alive && { ok "Shizuku is already running."; return 0; }
+  rish_ok || die "Run ${W}sukey setup${N} first."
+  start_help
+  open_shizuku
+  wait_alive 300 || die "Timed out. Once Shizuku says it's running, try: sukey status"
+}
+
+cmd_status() {
+  step "sukey $VERSION"
+  row Device "$(getprop ro.product.model 2>/dev/null) · Android $(getprop ro.build.version.release 2>/dev/null)"
+  if shizuku_apk >/dev/null; then row Shizuku "${G}installed${N}"; else row Shizuku "${Y}not detected${N}"; fi
+  if rish_ok; then row rish "${G}installed${N}"; else row rish "${R}missing — sukey setup${N}"; fi
+  if ! alive; then row "Privileged shell" "${R}not running — sukey start${N}"; return 0; fi
+  row "Privileged shell" "${G}running (uid 2000)${N}"
+
+  local s mpp mon dm ds an removed frozen
+  # shellcheck disable=SC2016  # expanded by the remote shell
+  s=$(priv 'echo "$(device_config get activity_manager max_phantom_processes)|$(settings get global settings_enable_monitor_phantom_procs)|$(settings get global private_dns_mode)|$(settings get global private_dns_specifier)|$(settings get global animator_duration_scale)"' | tr -d '\r' | tail -n1)
+  IFS='|' read -r mpp mon dm ds an <<<"$s"
+  if [ "$mpp" = 2147483647 ] || [ "$mon" = false ]; then
+    row "Phantom killer" "${G}disabled${N}"
+  else
+    row "Phantom killer" "${Y}active — sukey keepalive${N}"
+  fi
+  if [ "$dm" = hostname ]; then row "Ad-block DNS" "${G}on${N} ($ds)"; else row "Ad-block DNS" "off"; fi
+  [ "$an" = null ] && an=1
+  row "Animation scale" "${an:-1}"
+  removed=$(comm -23 <(pkgs -u) <(pkgs) | grep -c .)
+  frozen=$(pkgs -d | grep -c .)
+  row "Removed apps" "$removed"
+  row "Frozen apps" "$frozen"
+}
+
+do_keepalive() {
+  local installed p s kept=() chk
+  installed=$(pkgs)
+  s='device_config set_sync_disabled_for_tests persistent; device_config put activity_manager max_phantom_processes 2147483647; settings put global settings_enable_monitor_phantom_procs false;'
+  for p in com.termux com.termux.x11 com.termux.api com.termux.boot com.termux.widget "$SHIZUKU_PKG"; do
+    grep -qxF "$p" <<<"$installed" || continue
+    s+=" dumpsys deviceidle whitelist +$p >/dev/null 2>&1; cmd appops set $p RUN_ANY_IN_BACKGROUND allow; cmd appops set $p RUN_IN_BACKGROUND allow;"
+    kept+=("$p")
+  done
+  priv "$s" >/dev/null 2>&1
+  chk=$(priv 'device_config get activity_manager max_phantom_processes; settings get global settings_enable_monitor_phantom_procs' | tr -d '\r')
+  if grep -q 2147483647 <<<"$chk" || grep -qx false <<<"$chk"; then
+    ok "Phantom process killer off — no more '[Process completed (signal 9)]'."
+  else
+    warn "Couldn't confirm the phantom-process change (got: ${chk//$'\n'/ })"
+  fi
+  [ ${#kept[@]} -gt 0 ] && ok "Exempt from battery optimization + background limits: ${kept[*]}"
+  logact "keepalive ${kept[*]}"
+  info "Samsung extra: Settings › Battery › Background usage limits › ${W}Never sleeping apps${N} › add Termux"
+}
+cmd_keepalive() { need_alive; do_keepalive; }
+
+do_boot() {
+  local out
+  out=$(priv "pm grant $SHIZUKU_PKG android.permission.WRITE_SECURE_SETTINGS 2>&1" | tr -d '\r')
+  if [ -z "$out" ]; then
+    ok "Shizuku can now switch wireless debugging on by itself."
+    info "Turn on ${W}Shizuku › Settings › Start on boot${N} — it'll come back after a reboot once Wi-Fi connects."
+    logact "boot: granted WRITE_SECURE_SETTINGS to Shizuku"
+  else
+    warn "This Shizuku build won't take that permission: $out"
+    info "For start-on-boot, install thedjchi's fork: $FORK_URL"
+  fi
+}
+cmd_boot() { need_alive; do_boot; }
+
+cmd_debloat() {
+  need_alive
+  local mode=${1:-safe} sel=() installed e p found=()
+  case $mode in
+    safe)
+      installed=$(pkgs)
+      for e in "${SAFE_LIST[@]}"; do
+        p=${e%%|*}
+        grep -qxF "$p" <<<"$installed" && found+=("$p"$'\t'"${e#*|}")
+      done
+      if [ ${#found[@]} -eq 0 ]; then
+        ok "None of the known bloat is installed. Browse everything with: sukey debloat all"
+        return 0
+      fi
+      info "${#found[@]} known bloat package(s) on this phone."
+      mapfile -t sel < <(printf '%s\n' "${found[@]}" |
+        pick_multi "Known bloat — TAB select · Ctrl-A all · ENTER remove")
+      ;;
+    all)
+      mapfile -t sel < <({ pkgs -s | sed 's/$/\tsystem/'; pkgs -3 | sed 's/$/\tuser/'; } |
+        while IFS=$'\t' read -r p e; do
+          [ -n "$p" ] && ! guarded "$p" && printf '%s\t%s\n' "$p" "$e"
+        done | sort | pick_multi "All packages (critical ones hidden) — TAB select · ENTER remove")
+      ;;
+    *) sel=("$@") ;;
+  esac
+  [ ${#sel[@]} -gt 0 ] || { info "Nothing selected."; return 0; }
+  info "Removal is for your user only and reversible: ${W}sukey restore${N}"
+  batch Remove "pm uninstall -k --user 0" 'Success' yes "${sel[@]}"
+}
+
+cmd_restore() {
+  need_alive
+  local sel=("$@") removed
+  if [ ${#sel[@]} -eq 0 ]; then
+    removed=$(comm -23 <(pkgs -u) <(pkgs))
+    [ -n "$removed" ] || { ok "Nothing to restore — every system app is present."; return 0; }
+    mapfile -t sel < <(pick_multi "Removed packages — TAB select · Ctrl-A all · ENTER restore" <<<"$removed")
+  fi
+  batch Restore "cmd package install-existing --user 0" 'installed for user' no "${sel[@]}"
+}
+
+cmd_freeze() {
+  need_alive
+  local sel=("$@")
+  if [ ${#sel[@]} -eq 0 ]; then
+    mapfile -t sel < <(pkgs -e | while read -r p; do guarded "$p" || printf '%s\n' "$p"; done |
+      pick_multi "Apps to freeze (disable, keep installed) — TAB select")
+  fi
+  batch Freeze "pm disable-user --user 0" 'new state: disabled' yes "${sel[@]}"
+}
+
+cmd_unfreeze() {
+  need_alive
+  local sel=("$@") d
+  if [ ${#sel[@]} -eq 0 ]; then
+    d=$(pkgs -d)
+    [ -n "$d" ] || { ok "No frozen apps."; return 0; }
+    mapfile -t sel < <(pick_multi "Frozen apps — TAB select · ENTER re-enable" <<<"$d")
+  fi
+  batch Unfreeze "pm enable --user 0" 'new state: enabled' no "${sel[@]}"
+}
+
+cmd_grant() {
+  need_alive
+  local pkg=${1:-} perm=${2:-} e out out2 op
+  [ -n "$pkg" ] || pkg=$(pkgs -3 | pick_one "App to grant a permission to")
+  [ -n "$pkg" ] || return 0
+  valid_pkg "$pkg" || die "Not a package name: $pkg"
+  if [ -z "$perm" ]; then
+    perm=$(for e in "${PERMS[@]}"; do printf '%s\t%s\n' "${e%%|*}" "${e#*|}"; done |
+      pick_one "Permission for $pkg" | cut -f1)
+  fi
+  [ -n "$perm" ] || return 0
+  [[ $perm == *.* ]] || perm="android.permission.$perm"
+  [[ $perm =~ ^[A-Za-z0-9_.]+$ ]] || die "Not a permission name: $perm"
+  out=$(priv "pm grant $pkg $perm 2>&1" | tr -d '\r')
+  if [ -z "$out" ]; then
+    ok "Granted ${perm##*.} to $pkg"; logact "grant $pkg $perm"; return 0
+  fi
+  # Not a grantable permission — many of these are app-ops instead
+  op=${perm##*.}
+  out2=$(priv "cmd appops set $pkg $op allow 2>&1" | tr -d '\r')
+  if [ -z "$out2" ]; then
+    ok "Allowed $op for $pkg"; logact "appop $pkg $op allow"
+  else
+    err "pm grant: $out"; err "appops: $out2"; return 1
+  fi
+}
+
+cmd_adblock() {
+  need_alive
+  local host s m h
+  case ${1:-status} in
+    on)
+      host=${2:-$ADBLOCK_DNS}
+      [[ $host =~ ^[A-Za-z0-9.-]+$ ]] || die "Bad hostname: $host"
+      priv "settings put global private_dns_mode hostname; settings put global private_dns_specifier $host"
+      ok "Ad-blocking DNS on ($host) — covers every app and browser."
+      logact "adblock on $host"
+      ;;
+    off)
+      priv "settings put global private_dns_mode opportunistic"
+      ok "Private DNS back to Automatic."
+      logact "adblock off"
+      ;;
+    *)
+      s=$(priv 'settings get global private_dns_mode; settings get global private_dns_specifier' | tr -d '\r')
+      m=$(sed -n 1p <<<"$s"); h=$(sed -n 2p <<<"$s")
+      if [ "$m" = hostname ]; then ok "Ad-block DNS is on — $h"; else info "Ad-block DNS is off. Turn on: sukey adblock on"; fi
+      ;;
+  esac
+}
+
+cmd_anim() {
+  need_alive
+  local s=${1:-} cur
+  if [ -z "$s" ]; then
+    cur=$(priv 'settings get global animator_duration_scale' | tr -d '\r')
+    [ "$cur" = null ] && cur=1
+    s=$(printf '%s\t%s\n' 0.5 "snappy (recommended)" 0.75 "a bit faster" 1 "stock" 0 "off — instant" |
+      pick_one "Animation speed (now: ${cur:-1})" | cut -f1)
+  fi
+  [ -n "$s" ] || return 0
+  [[ $s =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "Use a number like 0.5"
+  priv "settings put global window_animation_scale $s; settings put global transition_animation_scale $s; settings put global animator_duration_scale $s"
+  ok "Animation scale set to $s"
+  logact "anim $s"
+}
+
+cmd_settings() {
+  need_alive
+  local line ns rest key val new
+  line=$(priv 'echo @@global; settings list global; echo @@secure; settings list secure; echo @@system; settings list system' |
+    tr -d '\r' | awk '/^@@/{ns=substr($0,3); next} NF{print ns "\t" $0}' |
+    pick_one "Android settings — pick one to edit (ESC quits)")
+  [ -n "$line" ] || return 0
+  ns=${line%%$'\t'*}; rest=${line#*$'\t'}; key=${rest%%=*}; val=${rest#*=}
+  [[ $key =~ ^[A-Za-z0-9_.:-]+$ ]] || die "Unusual key — edit it with: sukey run \"settings put $ns ...\""
+  printf '%s%s%s  %s = %s%s%s\n' "$C" "$ns" "$N" "$key" "$W" "$val" "$N"
+  read -r -p "New value (Enter = cancel, - = delete): " new </dev/tty || return 0
+  [ -n "$new" ] || { info "Unchanged."; return 0; }
+  if [ "$new" = - ]; then
+    priv "settings delete $ns $key" >/dev/null
+  else
+    priv "settings put $ns $key $(shq "$new")"
+  fi
+  ok "$ns/$key: $val → $new"
+  logact "setting $ns $key '$val' -> '$new'  (undo: sukey run \"settings put $ns $key '$val'\")"
+}
+
+cmd_install() {
+  need_alive
+  local f=${1:-} src out
+  if [ -z "$f" ]; then
+    f=$(find "$SHARED/Download" -maxdepth 2 -type f -name '*.apk' -printf '%T@\t%p\n' 2>/dev/null |
+      sort -rn | cut -f2 | pick_one "APK to install (newest first)")
+  fi
+  [ -n "$f" ] || return 0
+  [ -f "$f" ] || die "No such file: $f"
+  f=$(readlink -f "$f")
+  case $f in
+    "$SHARED"/*) src=$f ;;
+    *) mkdir -p "$STAGE" && cp "$f" "$STAGE/" && src="$STAGE/${f##*/}" ;;   # shell can't read Termux's private files
+  esac
+  info "Installing ${f##*/} …"
+  out=$(priv "pm install -r -d --bypass-low-target-sdk-block $(shq "$src") 2>&1")
+  grep -q Success <<<"$out" || out=$(priv "pm install -r -d $(shq "$src") 2>&1")
+  [ "$src" = "$f" ] || rm -f "$src"
+  if grep -q Success <<<"$out"; then ok "Installed."; logact "install ${f##*/}"; else err "$out"; return 1; fi
+}
+
+cmd_log() {
+  need_alive
+  if [ -n "${1:-}" ]; then "$RISH" -c "logcat -v color | grep -i -- $(shq "$1")"
+  else "$RISH" -c 'logcat -v color'; fi
+}
+
+cmd_run() {
+  need_alive
+  [ $# -gt 0 ] || die "Usage: sukey run '<command>'"
+  "$RISH" -c "$*"
+}
+
+cmd_sh() {
+  need_alive
+  info "Privileged shell (uid 2000) — type exit to leave."
+  exec "$RISH"
+}
+
+cmd_uninstall() { # removes sukey's own files; Android changes stay
+  if [ -f "$BIN/rish" ] && grep -q 'installed by sukey' "$BIN/rish" 2>/dev/null; then
+    rm -f "$BIN/rish"
+    [ -f "$BIN/rish.bak" ] && mv "$BIN/rish.bak" "$BIN/rish"
+  fi
+  if [[ $SUKEY_HOME == */sukey ]] && [ -d "$SUKEY_HOME" ]; then
+    chmod -R u+w "$SUKEY_HOME" 2>/dev/null; rm -rf "$SUKEY_HOME"
+  fi
+  ok "Removed rish and sukey's data."
+  info "Changes already made on the phone stay. To undo them first: sukey restore · sukey unfreeze · sukey adblock off · sukey anim 1"
+}
+
+cmd_history() {
+  if [ -s "$LOG" ]; then tail -n 50 "$LOG"; else info "No changes recorded yet."; fi
+}
+
+cmd_menu() {
+  local choice args=()
+  if ! rish_ok; then
+    info "sukey isn't set up yet — it needs the Shizuku app and a one-time pairing."
+    confirm "Run setup now?" y && cmd_setup
+    return 0
+  fi
+  choice=$(printf '%s\t%s\n' \
+    status        "What's working right now" \
+    start         "Start Shizuku (after a reboot)" \
+    sh            "Privileged shell — uid 2000" \
+    debloat       "Remove known bloat (safe list)" \
+    "debloat all" "Remove anything (critical apps protected)" \
+    restore       "Bring removed apps back" \
+    freeze        "Disable apps without removing them" \
+    unfreeze      "Re-enable frozen apps" \
+    grant         "Give an app a special permission" \
+    keepalive     "Stop Android killing Termux" \
+    "adblock on"  "System-wide ad blocking (Private DNS)" \
+    "adblock off" "Turn ad-blocking DNS off" \
+    anim          "Animation speed" \
+    settings      "Browse & edit hidden Android settings" \
+    install       "Install an APK (downgrades / old apps allowed)" \
+    log           "Live system log" \
+    boot          "Let Shizuku start on boot" \
+    history       "What sukey has changed" \
+    setup         "Re-run setup" |
+    pick_one "sukey $VERSION — near-root for Termux" | cut -f1)
+  [ -n "$choice" ] || return 0
+  read -ra args <<<"$choice"
+  main "${args[@]}"
+}
+
+usage() {
+  cat <<EOF
+${W}sukey $VERSION${N} — near-root for Termux via Shizuku (uid 2000, no unlock)
+
+${W}Setup${N}
+  setup                    install everything, start Shizuku, apply tweaks
+  start                    start Shizuku after a reboot and wait for it
+  status                   what's working
+  boot                     let Shizuku start itself on boot
+${W}Shell${N}
+  sh                       privileged interactive shell (also: rish)
+  run '<cmd>'              run one command privileged
+  log [filter]             live system logcat
+${W}Apps${N}
+  debloat [all|pkg...]     remove bloat for your user (reversible)
+  restore [pkg...]         bring removed apps back
+  freeze / unfreeze [pkg]  disable / re-enable without removing
+  grant [pkg] [PERM]       grant permissions or app-ops
+  install [file.apk]       install with downgrade + old-SDK bypass
+${W}System${N}
+  keepalive                stop phantom-process kills, battery exemptions
+  adblock on|off|status    system-wide ad-blocking Private DNS
+  anim [scale]             animation speed (0.5 = snappy)
+  settings                 browse & edit hidden global/secure/system settings
+  history                  log of every change sukey made
+  uninstall                remove rish and sukey's data (phone changes stay)
+${W}Flags${N}
+  -y, --yes                skip confirmations
+  --force                  allow touching protected system packages (careful)
+EOF
+}
+
+main() {
+  local c=${1:-menu}
+  [ $# -gt 0 ] && shift
+  case $c in
+    menu)              cmd_menu ;;
+    setup|install-self) cmd_setup ;;
+    start)             cmd_start ;;
+    status)            cmd_status ;;
+    boot)              cmd_boot ;;
+    sh|shell)          cmd_sh ;;
+    run|-c)            cmd_run "$@" ;;
+    log|logcat)        cmd_log "$@" ;;
+    debloat)           cmd_debloat "$@" ;;
+    restore)           cmd_restore "$@" ;;
+    freeze)            cmd_freeze "$@" ;;
+    unfreeze)          cmd_unfreeze "$@" ;;
+    grant)             cmd_grant "$@" ;;
+    install)           cmd_install "$@" ;;
+    keepalive)         cmd_keepalive ;;
+    adblock)           cmd_adblock "$@" ;;
+    anim)              cmd_anim "$@" ;;
+    settings)          cmd_settings ;;
+    history)           cmd_history ;;
+    uninstall)         cmd_uninstall ;;
+    help|-h|--help)    usage ;;
+    version|-v|--version) echo "sukey $VERSION" ;;
+    *) err "Unknown command: $c"; usage; exit 1 ;;
+  esac
+}
+
+ARGS=()
+for a in "$@"; do
+  case $a in
+    --force)   SUKEY_FORCE=1 ;;
+    -y|--yes)  SUKEY_YES=1 ;;
+    *)         ARGS+=("$a") ;;
+  esac
+done
+main "${ARGS[@]}"

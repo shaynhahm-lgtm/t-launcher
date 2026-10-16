@@ -39,6 +39,8 @@ network, scan network, network scan = netkey
 downloads, drop watch               = dropwatch
 pipe, offset                        = offset
 cardputer, card computer            = cardkey
+shizuku, near root, root tools      = sukey
+debloat, remove bloat               = sukey debloat
 EOF
 }
 

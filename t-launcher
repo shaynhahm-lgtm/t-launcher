@@ -1,7 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# Termux Launcher v6
+# Termux Launcher v7
 # Color-coded file browser with smart run/view actions.
-#  - Add-ons menu: dropwatch, cardkey, netkey, offset, tdoctor, clipkey, talk (install on first pick)
+#  - Add-ons menu: dropwatch, cardkey, netkey, offset, tdoctor, clipkey, talk, sukey (install on first pick)
 #  - Enter opens any file with the right thing (via topen); Tab = action menu
 #  - 10 file managers one tap away, installed for you with fmget
 #  - Dirs listed first, live preview pane (Ctrl+P hides/shows it)
@@ -323,7 +323,7 @@ options_menu() {
 }
 
 # ---------- Add-ons: extra tools, installed on first pick ----------
-ADDONS="dropwatch cardkey netkey offset tdoctor clipkey talk"
+ADDONS="dropwatch cardkey netkey offset tdoctor clipkey talk sukey"
 ADDON_RAW="https://raw.githubusercontent.com/shaynhahm-lgtm/t-launcher/${T_BRANCH:-main}/addons"
 
 addon_desc() {
@@ -335,6 +335,7 @@ addon_desc() {
     tdoctor)   echo "check & fix Termux" ;;
     clipkey)   echo "clipboard history" ;;
     talk)      echo "voice commands" ;;
+    sukey)     echo "near-root via Shizuku" ;;
   esac
 }
 
@@ -377,7 +378,7 @@ main_menu() {
   local hid choice
   [ "$SHOW_HIDDEN" = 1 ] && hid="Hide hidden files" || hid="Show hidden files"
   local -a items=()
-  items+=("Add-ons (dropwatch, cardkey, netkey, offset, tdoctor, clipkey, talk)")
+  items+=("Add-ons (dropwatch, cardkey, netkey, offset, tdoctor, clipkey, talk, sukey)")
   need pkgkey && items+=("Packages (pkgkey)")
   need fkey   && items+=("File types (fkey)")
   [ -d "$HOME/bin" ]       && items+=("My tools (~/bin)")

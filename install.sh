@@ -6,11 +6,12 @@
 #   bash install.sh --uninstall          remove everything
 RAW="https://raw.githubusercontent.com/shaynhahm-lgtm/t-launcher/${T_BRANCH:-main}"
 TOOLS="t-launcher pkgkey fkey topen fmget"
-ADDONS="dropwatch cardkey netkey offset tdoctor clipkey talk"   # these live in ~/bin
+ADDONS="dropwatch cardkey netkey offset tdoctor clipkey talk sukey"   # these live in ~/bin
 if [ "${1:-}" = "--uninstall" ]; then
   for t in $TOOLS; do rm -f "$PREFIX/bin/$t"; done
   [ -x "$HOME/bin/dropwatch" ] && "$HOME/bin/dropwatch" uninstall >/dev/null 2>&1
   [ -x "$HOME/bin/clipkey" ] && "$HOME/bin/clipkey" uninstall >/dev/null 2>&1
+  [ -x "$HOME/bin/sukey" ] && "$HOME/bin/sukey" uninstall >/dev/null 2>&1
   for a in $ADDONS; do rm -f "$HOME/bin/$a"; done
   echo "Removed: $TOOLS $ADDONS"; exit 0
 fi
@@ -59,4 +60,5 @@ for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
 done
 echo -e "\033[1;32mInstalled!\033[0m  Type: t-launcher   (also: topen <file>, fmget)"
 [ -n "$GOT" ] && echo -e "Add-ons:$GOT   (more in t-launcher → MENU → Add-ons)"
+case " $GOT " in *" sukey "*) echo "sukey needs a one-time Shizuku pairing: run  sukey setup" ;; esac
 exit 0
