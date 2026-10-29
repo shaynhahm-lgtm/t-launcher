@@ -58,7 +58,7 @@ for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
     cp "$PREFIX/bin/t-launcher" "$OLD" && chmod +x "$OLD" && echo "Also updated $OLD (your t-launcher alias points there)"
   fi
 done
-echo -e "\033[1;32mInstalled!\033[0m  Type: t-launcher   (also: topen <file>, fmget)"
+echo -e "\033[1;32mInstalled!\033[0m  Type: t-launcher   (Ctrl+S = split screen · also: topen <file>, fmget)"
 [ -n "$GOT" ] && echo -e "Add-ons:$GOT   (more in t-launcher → MENU → Add-ons)"
 case " $GOT " in *" sukey "*) echo "sukey needs a one-time Shizuku pairing: run  sukey setup" ;; esac
 exit 0

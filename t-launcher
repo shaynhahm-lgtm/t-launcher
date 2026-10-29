@@ -1,27 +1,32 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# Termux Launcher v7
-# Color-coded file browser with smart run/view actions.
-#  - Add-ons menu: dropwatch, cardkey, netkey, offset, tdoctor, clipkey, talk, sukey (install on first pick)
-#  - Enter opens any file with the right thing (via topen); Tab = action menu
-#  - 10 file managers one tap away, installed for you with fmget
-#  - Dirs listed first, live preview pane (Ctrl+P hides/shows it)
-#  - Action menu tailored to each file type, best option starred
-#  - Scripts run inside their own folder
-#  - pkgkey: searchable package picker with preview
-#  - fkey: its suggested commands, filled in with your file, ready to run
-#  - your ~/bin tools one tap away
+# t-launcher v8
+# Color-coded file browser for Termux with smart open/run actions.
+#  - NEW split screen (Ctrl+S): put a second browser, a shell, a viewer, htop,
+#    an add-on or any command next to your files. Copy/move between panes.
+#  - NEW menu, grouped: SPLIT · GO · TOOLS · APPS · VIEW · SETUP, with live
+#    status and a one-line explanation of whatever you highlight
+#  - NEW sort by name / newest / biggest; settings remembered between runs
+#  - NEW folder actions (Tab on a folder), copy / move / rename / delete
+#  - Enter opens any file with the right thing (topen); Tab = action menu
+#  - Add-ons: dropwatch, cardkey, netkey, offset, tdoctor, clipkey, talk, sukey
+#  - 10 file managers one tap away (fmget), pkgkey + fkey built in
 #  - ".." always goes up; Esc goes back like a browser
-#  - One MENU entry: desktop, fieldkit, tools, sync, downloads...
 #
-# Install/upgrade:  bash termux-launcher.sh --install
-# Requires: fzf
+# Install/upgrade:  bash t-launcher --install    (or MENU → Update t-launcher)
+# Requires: fzf  (tmux is installed for you the first time you split)
 # ============================================================
 
 set -uo pipefail
 
+VERSION=8
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+QSELF="$(printf '%q' "$SELF")"
+CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/t-launcher"
+CONF="$CONF_DIR/settings"
+RAW_BASE="https://raw.githubusercontent.com/shaynhahm-lgtm/t-launcher/${T_BRANCH:-main}"
+
 # ---------- Self-install (backs up old version, syncs to GitHub) ----------
 if [ "${1:-}" = "--install" ]; then
-  SELF="$(readlink -f "$0")"
   TARGET="$(grep -o '[^ =]*launcher[^ ]*\.sh' "$HOME/.zshrc" 2>/dev/null | head -1 \
     | sed -e "s#^[\"']##" -e "s#[\"']\$##" -e "s#~#$HOME#" -e "s#\\\$HOME#$HOME#")"
   [ -n "$TARGET" ] || TARGET="$HOME/bin/termux-launcher.sh"
@@ -55,73 +60,525 @@ C_OPT="\033[1;33m"
 C_MEDIA="\033[38;5;213m"
 C_DOC="\033[38;5;180m"
 C_OTHER="\033[0m"
+C_DIM="\033[38;5;244m"
+C_ACC="\033[1;38;5;51m"
+C_WARN="\033[1;33m"
+# menu group colors
+G_GO="\033[1;34m"; G_SPLIT="\033[1;38;5;51m"; G_TOOLS="\033[1;32m"
+G_APPS="\033[38;5;208m"; G_VIEW="\033[1;33m"; G_SETUP="\033[38;5;213m"
+G_RUN="\033[1;32m"; G_OPEN="\033[1;36m"; G_INFO="\033[38;5;180m"; G_FILE="\033[1;35m"
 
-MENU_ENTRY="::MENU:: packages, tools, shortcuts..."
+MENU_KEY="::MENU::"
+MENU_LABEL="Menu: split, add-ons, tools, settings"
 FIELDKIT_DIR="$HOME/fieldkit"
 DL="/storage/emulated/0/Download"
 [ -d "$DL" ] || DL="$HOME/storage/downloads"
-SHOW_HIDDEN=0
+ADDONS="dropwatch cardkey netkey offset tdoctor clipkey talk sukey"
+ADDON_RAW="$RAW_BASE/addons"
+FILE_MANAGERS="yazi mc ranger nnn lf vifm broot clifm fff walk"
+
+# ---------- Settings (remembered between runs) ----------
+SHOW_HIDDEN=0; SORT=name; PREVIEW_ON=1; SPLIT_LAYOUT=auto; SPLIT_SIZE=50; LAST_CMD=""
+load_settings() {
+  [ -f "$CONF" ] || return 0
+  local k v
+  while IFS='=' read -r k v; do
+    case "$k" in
+      SHOW_HIDDEN|PREVIEW_ON) [[ $v =~ ^[01]$ ]] && printf -v "$k" '%s' "$v" ;;
+      SORT)         case "$v" in name|newest|biggest) SORT="$v" ;; esac ;;
+      SPLIT_LAYOUT) case "$v" in auto|stacked|side) SPLIT_LAYOUT="$v" ;; esac ;;
+      SPLIT_SIZE)   case "$v" in 50|60|70) SPLIT_SIZE="$v" ;; esac ;;
+      LAST_CMD)     LAST_CMD="$v" ;;
+    esac
+  done < "$CONF"
+}
+save_settings() {
+  mkdir -p "$CONF_DIR" 2>/dev/null || return 0
+  printf '%s\n' "SHOW_HIDDEN=$SHOW_HIDDEN" "SORT=$SORT" "PREVIEW_ON=$PREVIEW_ON" \
+    "SPLIT_LAYOUT=$SPLIT_LAYOUT" "SPLIT_SIZE=$SPLIT_SIZE" "LAST_CMD=$LAST_CMD" > "$CONF.tmp.$$" \
+    && mv -f "$CONF.tmp.$$" "$CONF"
+}
+load_settings
 
 # ---------- Navigation stack ----------
 declare -a NAV_STACK=("$PWD")
-[ -d "${1:-}" ] && NAV_STACK=("$(readlink -f "$1")")
 current_dir() { printf '%s' "${NAV_STACK[-1]}"; }
 push_dir()    { NAV_STACK+=("$1"); }
 pop_dir()     { [ "${#NAV_STACK[@]}" -gt 1 ] && unset 'NAV_STACK[-1]'; }
 
+# ---------- Small helpers ----------
 need() { command -v "$1" >/dev/null 2>&1; }
 msg() {
   echo -e "$1"
-  read -n 1 -s -r -p "Press any key to continue..."
+  read -n 1 -s -r -p "$(echo -e "${C_DIM}Press any key to continue...${C_RESET}")"
   echo
 }
-pick() { # pick "Header" option... -> prints choice
+confirm() { local a; read -r -p "$(echo -e "$1") [y/N] " a; [[ $a == [yY]* ]]; }
+short() { # ~ for home, /sdcard for shared storage
+  local p="$1"
+  [[ $p == "$HOME"* ]] && p="~${p#"$HOME"}"
+  [[ $p == /storage/emulated/0* ]] && p="/sdcard${p#/storage/emulated/0}"
+  printf '%s' "${p:-/}"
+}
+human() { # bytes -> 1.2MB
+  if need numfmt; then numfmt --to=iec --suffix=B "$1" 2>/dev/null || printf '%sB' "$1"
+  else printf '%sB' "$1"; fi
+}
+cols() {
+  local r c
+  read -r r c < <(stty size </dev/tty 2>/dev/null)
+  [[ ${c:-} =~ ^[0-9]+$ ]] || c=50
+  printf '%s' "$c"
+}
+
+# ---------- fzf look (one style everywhere) ----------
+FZF_V=0
+fzf_ver() {
+  local v maj min
+  v="$(fzf --version 2>/dev/null)"; v="${v%% *}"
+  maj="${v%%.*}"; min="${v#*.}"; min="${min%%.*}"
+  [[ $maj =~ ^[0-9]+$ && $min =~ ^[0-9]+$ ]] && FZF_V=$((maj * 1000 + min))
+}
+fzf_ver
+FZF_STYLE=(--reverse --ansi --cycle --prompt='› ' --pointer='▌'
+  --color='fg:252,fg+:255,bg+:236,hl:214,hl+:214,prompt:51,pointer:51,info:244,header:244,spinner:51,marker:214')
+if [ "$FZF_V" -ge 42 ]; then
+  FZF_STYLE+=(--info=inline-right --separator='─' --border=top
+    --color='border:240,label:51,separator:238,scrollbar:240,preview-border:238')
+fi
+has_labels() { [ "$FZF_V" -ge 42 ]; }
+
+pick() { # pick "Title" option... -> prints the chosen line
   local h="$1"; shift
-  printf '%s\n' "$@" | fzf --header="$h" --height=60% --reverse
+  local -a o=("${FZF_STYLE[@]}")
+  if has_labels; then o+=(--border-label=" $h "); else o+=(--header="$h"); fi
+  printf '%s\n' "$@" | fzf "${o[@]}"
+}
+
+# Menu rows are "KEY<TAB>display". menu_pick shows the display and prints the KEY.
+#   MP="preview command" menu_pick ...   adds a description strip at the bottom
+LW=24
+set_widths() { local c; c="$(cols)"; LW=$(( c - 27 )); ((LW > 26)) && LW=26; ((LW < 12)) && LW=12; }
+row() { # row KEY COLOR GROUP LABEL [STATUS]
+  local lbl="$4" n
+  n=$(( LW - ${#lbl} )); ((n < 1)) && n=1
+  printf '%s\t%b%-6s%b %s%*s%b%s%b\n' "$1" "$2" "$3" "$C_RESET" "$lbl" "$n" '' "$C_DIM" "${5:-}" "$C_RESET"
+}
+menu_pick() { # menu_pick TITLE HINT [KEY-to-start-on] < rows  -> prints KEY
+  local title="$1" hint="$2" start="${3:-}" rows sel pos
+  rows="$(cat)"
+  local -a o=("${FZF_STYLE[@]}" --delimiter=$'\t' --with-nth=2..)
+  if has_labels; then o+=(--border-label=" $title "); [ -n "$hint" ] && o+=(--header="$hint")
+  else o+=(--header="$title${hint:+  ·  $hint}"); fi
+  if [ -n "$start" ] && [ "$FZF_V" -ge 36 ]; then
+    pos="$(printf '%s\n' "$rows" | grep -n -m1 "^$start"$'\t' | cut -d: -f1)"
+    [ -n "$pos" ] && o+=(--bind "load:pos($pos)")
+  fi
+  [ -n "${MP:-}" ] && o+=(--preview "$MP" --preview-window=down,4,border-top)
+  # in a short split pane, go full screen while picking, then put the split back
+  local zoomed=0 r rc
+  if in_tmux && [ "$(popt "$MYPANE" window_zoomed_flag)" = 0 ] && split_active; then
+    read -r r _ < <(stty size </dev/tty 2>/dev/null)
+    if [ "${r:-99}" -lt 30 ] || [ "$(cols)" -lt 60 ]; then tm resize-pane -Z -t "$MYPANE"; zoomed=1; fi
+  fi
+  sel="$(printf '%s\n' "$rows" | fzf "${o[@]}")"; rc=$?
+  [ "$zoomed" = 1 ] && tm resize-pane -Z -t "$MYPANE"
+  [ "$rc" = 0 ] || return 1
+  printf '%s' "${sel%%$'\t'*}"
 }
 
 # ---------- File type tag (no subshells, fast in big folders) ----------
 tag_for() {
   local f="$1" b="${1##*/}"
   case "${b,,}" in
-    *.sh|*.bash|*.zsh|*.py|*.pl|*.rb|*.js) TAG="${C_SCRIPT}[SCRIPT]" ;;
-    *.appimage|*.apk|*.deb)                TAG="${C_PKG}[PKG]" ;;
-    *.html|*.htm)                          TAG="${C_WEB}[WEB]" ;;
-    *.jpg|*.jpeg|*.png|*.gif|*.webp|*.bmp|*.heic|*.svg) TAG="${C_MEDIA}[IMAGE]" ;;
-    *.mp3|*.m4a|*.aac|*.flac|*.wav|*.ogg|*.opus)        TAG="${C_MEDIA}[AUDIO]" ;;
-    *.mp4|*.mkv|*.webm|*.avi|*.mov|*.3gp)               TAG="${C_MEDIA}[VIDEO]" ;;
-    *.pdf|*.epub|*.doc|*.docx|*.xls|*.xlsx|*.ppt|*.pptx|*.odt) TAG="${C_DOC}[DOC]" ;;
-    *.db|*.sqlite|*.sqlite3)               TAG="${C_DOC}[DB]" ;;
-    *.zip|*.tar|*.gz|*.tgz|*.bz2|*.xz|*.7z|*.rar|*.zst) TAG="${C_ARCHIVE}[ARCHIVE]" ;;
-    *.txt|*.md|*.conf|*.cfg|*.json|*.yml|*.yaml|*.ini|*.log|*.csv) TAG="${C_TEXT}[TEXT]" ;;
-    *) if [ -x "$f" ]; then TAG="${C_EXEC}[EXEC]"; else TAG="${C_OTHER}[FILE]"; fi ;;
+    *.sh|*.bash|*.zsh|*.py|*.pl|*.rb|*.js) TAG="[SCRIPT]"; TC="$C_SCRIPT" ;;
+    *.appimage|*.apk|*.deb)                TAG="[PKG]";    TC="$C_PKG" ;;
+    *.html|*.htm)                          TAG="[WEB]";    TC="$C_WEB" ;;
+    *.jpg|*.jpeg|*.png|*.gif|*.webp|*.bmp|*.heic|*.svg) TAG="[IMAGE]"; TC="$C_MEDIA" ;;
+    *.mp3|*.m4a|*.aac|*.flac|*.wav|*.ogg|*.opus)        TAG="[AUDIO]"; TC="$C_MEDIA" ;;
+    *.mp4|*.mkv|*.webm|*.avi|*.mov|*.3gp)               TAG="[VIDEO]"; TC="$C_MEDIA" ;;
+    *.pdf|*.epub|*.doc|*.docx|*.xls|*.xlsx|*.ppt|*.pptx|*.odt) TAG="[DOC]"; TC="$C_DOC" ;;
+    *.db|*.sqlite|*.sqlite3)               TAG="[DB]";     TC="$C_DOC" ;;
+    *.zip|*.tar|*.gz|*.tgz|*.bz2|*.xz|*.7z|*.rar|*.zst) TAG="[ARCHIVE]"; TC="$C_ARCHIVE" ;;
+    *.txt|*.md|*.conf|*.cfg|*.json|*.yml|*.yaml|*.ini|*.log|*.csv) TAG="[TEXT]"; TC="$C_TEXT" ;;
+    *) if [ -x "$f" ]; then TAG="[EXEC]"; TC="$C_EXEC"; else TAG="[FILE]"; TC="$C_OTHER"; fi ;;
   esac
 }
 
-# ---------- Listing: dirs first, then files ----------
+# ---------- Listing: dirs first, then files, in the chosen sort ----------
+# Each line: "<colored display><TAB><real name>"
+LIST_COUNT=0
 build_listing() {
-  local dir="$1" f
-  printf '%b\t%s\n' "${C_DIR}[UP]${C_RESET}" ".."
-  printf '%b\t%s\n' "${C_OPT}[MENU]${C_RESET}" "$MENU_ENTRY"
-  shopt -s nullglob
-  [ "$SHOW_HIDDEN" = 1 ] && shopt -s dotglob
-  for f in "$dir"/*/; do
-    f="${f%/}"; printf '%b\t%s\n' "${C_DIR}[DIR]${C_RESET}" "${f##*/}"
-  done
-  for f in "$dir"/*; do
-    [ -d "$f" ] && continue
-    tag_for "$f"; printf '%b\t%s\n' "${TAG}${C_RESET}" "${f##*/}"
-  done
-  shopt -u dotglob nullglob
+  local dir="$1" g t s m name key
+  printf '%b%-9s%b %s\t%s\n' "$C_DIR" "[UP]" "$C_RESET" ".." ".."
+  printf '%b%-9s%b %b%s%b\t%s\n' "$C_OPT" "[MENU]" "$C_RESET" "$C_OPT" "$MENU_LABEL" "$C_RESET" "$MENU_KEY"
+  local -a fa=(-mindepth 1 -maxdepth 1)
+  [ "$SHOW_HIDDEN" = 1 ] || fa+=(-not -name '.*')
+  case "$SORT" in newest) key='-k4,4nr' ;; biggest) key='-k3,3nr' ;; *) key='-k5,5f' ;; esac
+  LIST_COUNT=0
+  while IFS=$'\t' read -r g t s m name; do
+    [ -n "$name" ] || continue
+    LIST_COUNT=$((LIST_COUNT + 1))
+    if [ "$t" = d ]; then
+      printf '%b%-9s%b %b%s/%b\t%s\n' "$C_DIR" "[DIR]" "$C_RESET" "$C_DIR" "$name" "$C_RESET" "$name"
+    else
+      tag_for "$dir/$name"
+      printf '%b%-9s%b %s\t%s\n' "$TC" "$TAG" "$C_RESET" "$name" "$name"
+    fi
+  done < <(find "$dir" "${fa[@]}" -printf '%Y\t%s\t%T@\t%f\n' 2>/dev/null \
+           | awk -F'\t' 'BEGIN{OFS="\t"} {print ($1=="d" ? 0 : 1), $0}' \
+           | LC_ALL=C sort -t $'\t' -k1,1n $key)
 }
 
-PREVIEW='p="$LAUNCH_CUR"/{2}; if [ -d "$p" ]; then ls -p "$p" 2>/dev/null | head -80; elif [ -f "$p" ]; then head -c 4000 "$p" 2>/dev/null | cat -v | head -80; fi'
+# ---------- Preview pane ----------
+do_preview() {
+  local name="$1" cur="${LAUNCH_CUR:-$PWD}" p sz n
+  if [ "$name" = "$MENU_KEY" ]; then
+    echo -e "${G_SPLIT}SPLIT${C_RESET}  second browser, shell, viewer, htop, add-ons"
+    echo -e "${G_GO}GO${C_RESET}     home, Downloads, any folder, new folder"
+    echo -e "${G_TOOLS}TOOLS${C_RESET}  add-ons, ~/bin, pkgkey, fkey"
+    echo -e "${G_APPS}APPS${C_RESET}   desktop, Fieldkit, other file managers"
+    echo -e "${G_VIEW}VIEW${C_RESET}   hidden files, sort, preview"
+    echo -e "${G_SETUP}SETUP${C_RESET}  open-with rules, sync, update, keys"
+    return
+  fi
+  if [ "$name" = ".." ]; then p="$(dirname "$cur")"; else p="${cur%/}/$name"; fi
+  if [ -d "$p" ]; then
+    n="$(find "$p" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)"
+    echo -e "${C_DIM}folder · $n $([ "$n" = 1 ] && echo item || echo items) · $(short "$p")${C_RESET}"
+    ls -1p --group-directories-first --color=always "$p" 2>/dev/null | head -100
+    return
+  fi
+  [ -e "$p" ] || return
+  sz="$(stat -c %s "$p" 2>/dev/null || echo 0)"
+  echo -e "${C_DIM}$(human "$sz") · $(date -r "$p" '+%b %d %Y %H:%M' 2>/dev/null)$([ -x "$p" ] && echo ' · executable')${C_RESET}"
+  [ "$sz" = 0 ] && { echo "(empty file)"; return; }
+  case "${name,,}" in
+    *.zip|*.apk|*.jar) need unzip && unzip -l "$p" 2>/dev/null | head -60; return ;;
+    *.tar|*.tar.*|*.tgz) tar -tf "$p" 2>/dev/null | head -60; return ;;
+    *.7z) need 7z && 7z l "$p" 2>/dev/null | tail -n +14 | head -60; return ;;
+    *.jpg|*.jpeg|*.png|*.gif|*.webp|*.bmp|*.heic|*.mp3|*.m4a|*.aac|*.flac|*.wav|*.ogg|*.opus|*.mp4|*.mkv|*.webm|*.avi|*.mov|*.3gp|*.pdf|*.docx|*.xlsx|*.pptx|*.odt|*.epub)
+      need file && file -b "$p" | fold -s -w 60
+      echo -e "${C_DIM}Enter opens it in the matching Android app.${C_RESET}"; return ;;
+  esac
+  if grep -Iq . "$p" 2>/dev/null; then
+    if need bat; then bat --color=always --style=plain --paging=never --line-range=:120 "$p" 2>/dev/null
+    elif need batcat; then batcat --color=always --style=plain --paging=never --line-range=:120 "$p" 2>/dev/null
+    else head -c 6000 "$p" | head -120; fi
+  else
+    if need file; then file -b "$p" | fold -s -w 60; else echo "binary file"; fi
+  fi
+}
 
-# ---------- Run helper: runs inside the file's folder, reports exit code ----------
+# ---------- Split screen (tmux) ----------
+# Each pane t-launcher manages carries tmux pane options:
+#   @tl_role  files | shell | view | mon | tool | cmd
+#   @tl_label what the pane's title bar says
+#   @tl_dir   (browsers) the folder it is showing
+#   @tl_list  (browsers) 1 while the file list is on screen, so the other pane can refresh it
+MYPANE="${TMUX_PANE:-}"
+in_tmux() { [ -n "${TMUX:-}" ] && [ -n "$MYPANE" ]; }
+tm() { tmux "$@" 2>/dev/null; }
+popt() { [ -n "${1:-}" ] && tm display -p -t "$1" "#{$2}"; }
+setp() { in_tmux && tm set -p -t "$MYPANE" "$1" "$2"; }
+others() { in_tmux && tm list-panes -t "$MYPANE" -F '#{pane_id}' | grep -vx "$MYPANE"; }
+partner() { # first other pane t-launcher owns (optionally of one role)
+  local p r
+  for p in $(others); do
+    r="$(popt "$p" @tl_role)"
+    [ -n "$r" ] || continue
+    if [ -z "${1:-}" ] || [ "$r" = "$1" ]; then printf '%s' "$p"; return 0; fi
+  done
+  return 1
+}
+partner_role() { local p; p="$(partner)" && popt "$p" @tl_role; }
+split_active() { [ -n "$(partner)" ]; }
+role_name() {
+  case "$1" in
+    files) echo "file browser" ;; shell) echo "shell" ;; view) echo "viewer" ;;
+    mon) echo "system monitor" ;; tool|cmd) echo "command" ;; *) echo "pane" ;;
+  esac
+}
+
+style_window() { # a title bar on each pane
+  tm set -w -t "$MYPANE" pane-border-status top
+  tm set -w -t "$MYPANE" pane-border-lines heavy
+  tm set -w -t "$MYPANE" pane-border-style 'fg=colour238'
+  tm set -w -t "$MYPANE" pane-active-border-style 'fg=colour51'
+  tm set -w -t "$MYPANE" pane-border-format \
+    '#{?pane_active,#[fg=colour235#,bg=colour51#,bold],#[fg=colour250#,bg=colour238]} #{?#{@tl_label},#{@tl_label},#{pane_current_command}} #[default]'
+}
+unstyle_window() {
+  local o
+  for o in pane-border-status pane-border-lines pane-border-style pane-active-border-style pane-border-format; do
+    tm set -wu -t "$MYPANE" "$o"
+  done
+}
+style_session() { # only for the tmux session t-launcher started itself
+  tm set -t "$MYPANE" mouse on
+  tm set -s escape-time 10
+  tm set -t "$MYPANE" status-style 'bg=colour235,fg=colour244'
+  tm set -t "$MYPANE" status-left '#[fg=colour235,bg=colour51,bold] t-launcher #[default] '
+  tm set -t "$MYPANE" status-left-length 16
+  tm set -t "$MYPANE" status-right '#[fg=colour244]tap a pane to switch · ^S split '
+  tm set -t "$MYPANE" status-right-length 40
+  tm set -t "$MYPANE" window-status-format ''
+  tm set -t "$MYPANE" window-status-current-format ''
+}
+
+ensure_tmux() {
+  need tmux && return 0
+  echo -e "${C_ACC}Split screen needs tmux. Installing it (one time)...${C_RESET}"
+  if need pkg; then pkg install -y tmux; fi
+  hash -r; need tmux || { msg "Couldn't install tmux. Try: pkg install tmux"; return 1; }
+}
+
+layout_flag() { # -v = top/bottom, -h = side by side
+  case "$SPLIT_LAYOUT" in
+    stacked) echo -v ;; side) echo -h ;;
+    *) if [ "$(cols)" -ge 90 ]; then echo -h; else echo -v; fi ;;
+  esac
+}
+layout_text() {
+  case "$SPLIT_LAYOUT" in
+    stacked) echo "top/bottom" ;; side) echo "side by side" ;;
+    *) if [ "$(cols)" -ge 90 ]; then echo "auto (side)"; else echo "auto (top/bottom)"; fi ;;
+  esac
+}
+
+# split_open ROLE [ARG] - opens the other pane, or swaps out what's in it
+split_open() {
+  local role="$1" arg="${2:-}" dir o new label focus=keep sh
+  dir="$(current_dir)"
+  if ! in_tmux; then
+    ensure_tmux || return 1
+    save_settings
+    exec tmux new-session -c "$dir" -e TL_OWNED=1 bash "$SELF" --split "$role" "$arg" "$dir"
+  fi
+  sh="$(tm show -gv default-shell)"; [ -n "$sh" ] || sh="${SHELL:-bash}"
+  local -a cmd=()
+  case "$role" in
+    files) cmd=(bash "$SELF" --pane "${arg:-$dir}"); label="FILES" ;;
+    shell) cmd=("$sh"); label="SHELL"; focus=new ;;
+    view)  if [ -n "$arg" ]; then cmd=(bash "$SELF" --view open "$arg" "$MYPANE"); focus=new  # open a file now
+           else cmd=(bash "$SELF" --viewer-idle); fi; label="VIEWER" ;;
+    mon)   cmd=(bash "$SELF" --monitor); label="MONITOR" ;;
+    tool)  cmd=(bash "$SELF" --run-pane tool "$arg"); label="${arg##*/}"; focus=new ;;
+    cmd)   cmd=(bash "$SELF" --run-pane cmd "$arg"); label="CMD ${arg%% *}"; focus=new ;;
+    *) return 1 ;;
+  esac
+  o="$(partner)"
+  if [ -n "$o" ]; then
+    tm respawn-pane -k -t "$o" -c "$dir" "${cmd[@]}" && new="$o"
+  else
+    new="$(tm split-window -d -P -F '#{pane_id}' -t "$MYPANE" "$(layout_flag)" \
+      -l "$((100 - SPLIT_SIZE))%" -c "$dir" "${cmd[@]}")"
+  fi
+  [ -n "${new:-}" ] || { msg "Couldn't open the split."; return 1; }
+  tm set -p -t "$new" @tl_role "$role"
+  tm set -p -t "$new" @tl_label "$label"
+  setp @tl_role files
+  setp @tl_label "FILES $(short "$dir")"
+  style_window
+  [ "$focus" = new ] && tm select-pane -t "$new"
+  return 0
+}
+
+split_close() {
+  local p
+  for p in $(others); do [ -n "$(popt "$p" @tl_role)" ] && tm kill-pane -t "$p"; done
+  unstyle_window
+}
+side_by_side() { local o; o="$(partner)" || return 1; [ "$(popt "$MYPANE" pane_top)" = "$(popt "$o" pane_top)" ]; }
+split_flip() {
+  partner >/dev/null || return
+  if side_by_side; then SPLIT_LAYOUT=stacked; tm select-layout -t "$MYPANE" even-vertical
+  else SPLIT_LAYOUT=side; tm select-layout -t "$MYPANE" even-horizontal; fi
+  split_resize; save_settings
+}
+split_resize() {
+  partner >/dev/null || return 0
+  if side_by_side; then tm resize-pane -t "$MYPANE" -x "${SPLIT_SIZE}%"
+  else tm resize-pane -t "$MYPANE" -y "${SPLIT_SIZE}%"; fi
+}
+
+helper_exit() { # a split pane is closing: tidy the window and refresh the browser
+  in_tmux || return 0
+  local b p n=0
+  b="$(partner files)" || return 0
+  for p in $(others); do [ "$p" != "$b" ] && [ -n "$(popt "$p" @tl_role)" ] && n=$((n + 1)); done
+  [ "$n" = 0 ] && unstyle_window
+  [ "$(popt "$b" @tl_list)" = 1 ] && tm run-shell -b "sleep 0.3; tmux send-keys -t $b F5"
+  return 0
+}
+
+refresh_partner() { # make the other browser re-read its folder
+  local p; p="$(partner files)" || return 0
+  [ "$(popt "$p" @tl_list)" = 1 ] && tm send-keys -t "$p" F5
+  return 0
+}
+
+# Open a file in the viewer pane if there is one, otherwise right here
+open_file() { # open_file MODE FILE    MODE = open | view | edit
+  local mode="$1" file="$2" v
+  if v="$(partner view)"; then
+    tm respawn-pane -k -t "$v" -c "${file%/*}" bash "$SELF" --view "$mode" "$file" "$MYPANE"
+    tm select-pane -t "$v"
+    return
+  fi
+  case "$mode" in
+    open) if need topen; then topen --pause "$file"; else less -R "$file"; fi ;;
+    view) less -R "$file" ;;
+    edit) if need nano; then nano "$file"; else "${EDITOR:-vi}" "$file"; fi ;;
+  esac
+}
+
+# Send a folder to the other pane: a browser goes there, a shell cd's there
+send_folder() {
+  local d="$1" p r
+  if p="$(partner)"; then
+    r="$(popt "$p" @tl_role)"
+    case "$r" in
+      files) tm respawn-pane -k -t "$p" -c "$d" bash "$SELF" --pane "$d" ;;
+      shell) tm send-keys -t "$p" "cd -- $(printf '%q' "$d")" Enter ;;
+      *)     split_open files "$d"; return ;;
+    esac
+    tm select-pane -t "$p"
+  else
+    split_open files "$d"
+  fi
+}
+
+# Run a script in the split: typed into a shell pane, otherwise in a run pane
+run_in_split() {
+  local file="$1" dir="${1%/*}" p c
+  if need topen; then c="topen ./$(printf '%q' "${file##*/}")"; else c="bash ./$(printf '%q' "${file##*/}")"; fi
+  if p="$(partner shell)"; then
+    [ "$(popt "$p" pane_current_path)" = "$dir" ] || c="cd -- $(printf '%q' "$dir") && $c"
+    tm send-keys -t "$p" "$c" Enter; tm select-pane -t "$p"
+  else
+    split_open cmd "cd -- $(printf '%q' "$dir") && $c"
+  fi
+}
+
+split_menu() {
+  local choice o r last="" hint
+  while true; do
+    set_widths
+    o="$(partner)"; r=""; [ -n "$o" ] && r="$(popt "$o" @tl_role)"
+    hint="What goes in the other pane?"
+    [ -n "$o" ] && hint="Now: $(role_name "$r"). Pick one to swap it."
+    choice="$( {
+      if [ -n "$o" ]; then
+        row sw     "$G_SPLIT" NOW   "Switch to other pane"
+        row zoom   "$G_SPLIT" NOW   "Full screen (toggle)"  "this pane"
+        row swap   "$G_SPLIT" NOW   "Swap panes"
+        row flip   "$G_SPLIT" NOW   "Flip layout"           "$(side_by_side && echo "to top/bottom" || echo "to side by side")"
+        row close  "$C_EXEC"  NOW   "Close the split"
+      fi
+      row files    "$G_GO"    FILES "Second file browser"   "copy & move"
+      row shell    "$G_TOOLS" SHELL "Shell"                 "in this folder"
+      row view     "$G_OPEN"  VIEW  "Viewer"                "files open there"
+      row mon      "$G_APPS"  MON   "System monitor"        "htop"
+      row tool     "$G_SETUP" TOOL  "Add-on or tool…"       "offset, netkey…"
+      row cmd      "$G_VIEW"  CMD   "Custom command…"       "${LAST_CMD:-anything}"
+      row layout   "$C_DIM"   SET   "Layout"                "$(layout_text)"
+      row size     "$C_DIM"   SET   "Size"                  "files $SPLIT_SIZE%"
+    } | MP="bash $QSELF --describe split-{1}" menu_pick "Split screen" "$hint" "$last")" || return
+    last="$choice"
+    case "$choice" in
+      sw)    tm select-pane -t "$o"; return ;;
+      zoom)  tm resize-pane -Z -t "$MYPANE"; return ;;
+      swap)  tm swap-pane -d -s "$MYPANE" -t "$o"; return ;;
+      flip)  split_flip ;;
+      close) split_close; return ;;
+      layout)
+        case "$SPLIT_LAYOUT" in auto) SPLIT_LAYOUT=stacked ;; stacked) SPLIT_LAYOUT=side ;; *) SPLIT_LAYOUT=auto ;; esac
+        save_settings ;;
+      size)
+        case "$SPLIT_SIZE" in 50) SPLIT_SIZE=60 ;; 60) SPLIT_SIZE=70 ;; *) SPLIT_SIZE=50 ;; esac
+        save_settings; split_resize ;;
+      files|shell|view|mon) split_open "$choice"; return ;;
+      tool)
+        local t; t="$(tool_pick)" || continue
+        split_open tool "$(command -v "$t" || echo "$t")"; return ;;
+      cmd)
+        local c
+        echo -e "${C_ACC}Command for the other pane${C_RESET} ${C_DIM}(aliases work · Tab completes)${C_RESET}"
+        read -r -e -p "$ " -i "$LAST_CMD" c
+        [ -n "$c" ] || continue
+        LAST_CMD="$c"; save_settings
+        split_open cmd "$c"; return ;;
+    esac
+  done
+}
+
+tool_pick() { # add-ons + ~/bin tools -> prints a command name (installs add-ons first)
+  local a t choice
+  set_widths
+  choice="$( {
+    for a in $ADDONS; do
+      if need "$a"; then row "$a" "$G_TOOLS" ADDON "$a" "$(addon_desc "$a")"
+      else row "$a" "$C_DIM" GET "$a" "$(addon_desc "$a")"; fi
+    done
+    while IFS= read -r t; do
+      case " $ADDONS " in *" $t "*) continue ;; esac
+      row "$t" "$G_SETUP" BIN "$t" "~/bin"
+    done < <(bin_tools)
+    need pkgkey && row pkgkey "$G_INFO" PKG pkgkey "packages"
+  } | menu_pick "Run in the other pane" "GET = installs on pick")" || return 1
+  case " $ADDONS " in
+    *" $choice "*) need "$choice" || get_addon "$choice" || { msg "Install of $choice failed."; return 1; } ;;
+  esac
+  printf '%s' "$choice"
+}
+
+# ---------- Programs that run inside a split pane ----------
+viewer_idle() {
+  clear
+  echo -e "\n  ${C_ACC}VIEWER${C_RESET}\n"
+  echo -e "  Files you open in the browser"
+  echo -e "  show up here.\n"
+  echo -e "  ${C_DIM}Enter on a file    opens it here"
+  echo -e "  Tab → View / Edit  opens here too"
+  echo -e "  Tap the browser    to go back${C_RESET}"
+  while :; do read -rsn1 _ 2>/dev/null || sleep 5; done
+}
+viewer_open() { # MODE FILE BROWSER-PANE
+  local mode="$1" file="$2" back="$3"
+  tm set -p -t "$MYPANE" @tl_label "VIEWER ${file##*/}"
+  case "$mode" in
+    open) if need topen; then topen --pause "$file"; else less -R "$file"; fi ;;
+    view) less -R "$file" ;;
+    edit) if need nano; then nano "$file"; else "${EDITOR:-vi}" "$file"; fi ;;
+  esac
+  tm set -p -t "$MYPANE" @tl_label "VIEWER"
+  [ -n "$back" ] && tm select-pane -t "$back"
+  exec bash "$SELF" --viewer-idle
+}
+monitor_pane() {
+  if ! need htop && ! need btop; then
+    echo "Installing htop (one time)..."; need pkg && pkg install -y htop; hash -r
+  fi
+  if need htop; then htop; elif need btop; then btop; else top; fi
+}
+run_pane() { # KIND WHAT   (tool = a command, cmd = a command line for your shell)
+  local kind="$1" what="$2" rc sh="${SHELL:-bash}" k
+  case ":$PATH:" in *":$HOME/bin:"*) ;; *) export PATH="$HOME/bin:$PATH" ;; esac
+  if [ "$kind" = tool ]; then "$what"; rc=$?
+  else "$sh" -ic "$what"; rc=$?; fi
+  echo -e "\n${C_DIM}── done (exit $rc) · r = again · any key closes ──${C_RESET}"
+  read -rsn1 k
+  [ "$k" = r ] && exec bash "$SELF" --run-pane "$kind" "$what"
+  helper_exit
+  exit 0
+}
+
+# ---------- Run helpers ----------
 run_in_dir() { # run_in_dir DIR cmd args...
-  local d="$1"; shift
-  (cd "$d" && "$@")
-  msg "\nFinished (exit code $?)."
+  local d="$1" rc; shift
+  (cd "$d" && "$@"); rc=$?
+  msg "\n${C_DIM}Finished (exit code $rc).${C_RESET}"
 }
 
 extract_here() {
@@ -134,6 +591,48 @@ extract_here() {
     *.xz)  run_in_dir "$dir" unxz -k "$file" ;;
     *.bz2) run_in_dir "$dir" bunzip2 -k "$file" ;;
   esac
+}
+
+# ---------- File operations ----------
+xfer() { # xfer cp|mv SRC DESTDIR
+  local op="$1" src="$2" ddir="$3" dst
+  dst="${ddir%/}/${src##*/}"
+  [ "$(readlink -f "$src")" = "$(readlink -f "$dst")" ] && { msg "That's the same place."; return 1; }
+  if [ -e "$dst" ]; then
+    confirm "${C_WARN}$(short "$dst") already exists. Replace it?${C_RESET}" || return 1
+    rm -rf -- "$dst" || { msg "Couldn't remove the old one."; return 1; }
+  fi
+  if [ "$op" = cp ]; then echo "Copying ${src##*/} → $(short "$ddir") ..."; cp -r -- "$src" "$dst"
+  else echo "Moving ${src##*/} → $(short "$ddir") ..."; mv -- "$src" "$dst"; fi \
+    || { msg "That didn't work (check space and permissions)."; return 1; }
+  refresh_partner
+  return 0
+}
+ask_dest() { # prompt for a destination folder (Tab completes)
+  local d
+  read -r -e -p "To folder: " -i "$(short "$(current_dir)")/" d
+  d="${d/#\~/$HOME}"
+  [ -n "$d" ] || return 1
+  if [ ! -d "$d" ]; then
+    confirm "$(short "$d") doesn't exist. Create it?" && mkdir -p -- "$d" || return 1
+  fi
+  printf '%s' "$d"
+}
+rename_item() {
+  local p="$1" n
+  read -r -e -p "New name: " -i "${p##*/}" n
+  [ -n "$n" ] && [ "$n" != "${p##*/}" ] || return
+  [[ $n == */* ]] && { msg "Names can't contain /"; return; }
+  [ -e "${p%/*}/$n" ] && { msg "Something called $n is already here."; return; }
+  mv -- "$p" "${p%/*}/$n" || msg "Rename failed."
+  refresh_partner
+}
+delete_item() {
+  local p="$1" what="file"
+  [ -d "$p" ] && what="folder and everything in it"
+  confirm "${C_EXEC}Delete $(short "$p") ($what)? This can't be undone.${C_RESET}" || return
+  if rm -rf -- "$p"; then echo "Deleted."; else msg "Delete failed."; fi
+  refresh_partner
 }
 
 # ---------- fkey: turn its suggestions into runnable commands ----------
@@ -158,16 +657,18 @@ fill_name() { # swap fkey placeholders (file.tar.gz, yourfile.x, in.mp4) for the
 }
 
 fkey_menu() {
-  local file="$1" base="${1##*/}" dir="${1%/*}" q c d choice i=0
+  local file="$1" base="${1##*/}" dir="${1%/*}" q c d choice it i=0
   q="$(printf '%q' "$base")"
   local -a cmds=() items=()
   while IFS=$'\t' read -r c d; do
     c="$(fill_name "$c" "$q")"
-    cmds+=("$c"); items+=("$i"$'\t'"$c"$'\t'"# $d"); i=$((i+1))
+    printf -v it '%s\t%s\t%b# %s%b' "$i" "$c" "$C_DIM" "$d" "$C_RESET"
+    cmds+=("$c"); items+=("$it"); i=$((i+1))
   done < <(fkey_cmds "$file")
   [ "${#cmds[@]}" -eq 0 ] && { msg "fkey has no commands for this file type."; return; }
-  choice="$(printf '%s\n' "${items[@]}" | fzf --delimiter '\t' --with-nth=2,3 \
-    --header="fkey commands for $base  (pick, edit, Enter to run)" --height=70% --reverse)" || return
+  local -a o=("${FZF_STYLE[@]}" --delimiter $'\t' --with-nth=2,3 --header="pick one, edit it, Enter runs it")
+  has_labels && o+=(--border-label=" fkey · $base ")
+  choice="$(printf '%s\n' "${items[@]}" | fzf "${o[@]}")" || return
   c="${cmds[${choice%%$'\t'*}]}"
   read -r -e -p "$ " -i "$c" c
   [ -z "$c" ] && return
@@ -177,91 +678,158 @@ fkey_menu() {
 # ---------- pkgkey: searchable package picker with live preview ----------
 pkgkey_menu() {
   local sel pkg
+  local -a o=("${FZF_STYLE[@]}" --header="type to search · Esc = back"
+    --preview 'pkgkey {1} </dev/null 2>/dev/null' --preview-window=down,50%,border-top)
+  has_labels && o+=(--border-label=" Packages ")
   while true; do
-    sel="$(pkgkey -l 2>/dev/null | fzf --header="Packages  (type to search, Esc = back)" \
-      --height=95% --reverse --preview 'pkgkey {1} </dev/null 2>/dev/null' \
-      --preview-window=down,50%)" || return
+    sel="$(pkgkey -l 2>/dev/null | fzf "${o[@]}")" || return
     pkg="${sel%% *}"; [ -z "$pkg" ] && return
     clear; pkgkey "$pkg"
     msg ""
   done
 }
 
-# ---------- Action menu, tailored to the file type ----------
-run_action_menu() {
-  local file="$1" base="${1##*/}" dir="${1%/*}" l choice rc name
+# ---------- Action menus ----------
+file_actions() {
+  local file="$1" base="${1##*/}" dir="${1%/*}" l choice name="" how="" ob="" od="" pr="" vp="" sb=""
   l="${base,,}"
-  local -a opts=()
-  add() { local o; for o in "${opts[@]}"; do [ "$o" = "$1" ] && return; done; opts+=("$1"); }
+  set_widths
+  ob="$(partner files)" && od="$(popt "$ob" @tl_dir)"
+  vp="$(partner view)"
+  pr="$(partner_role)"
+  need topen && how="$(topen -n "$file" 2>/dev/null | sed -n 's/^  opens with: //p')"
+  sb="$(head -c 2 "$file" 2>/dev/null | tr -d '\0')"
+  local -a seen=(); local starred=0
+  act() { # act KEY COLOR GROUP LABEL [STATUS]  (first one wins, only one ★)
+    local s lbl="$4"; for s in "${seen[@]}"; do [ "$s" = "$1" ] && return; done
+    seen+=("$1")
+    if [[ $lbl == "★ "* ]]; then
+      if [ "$starred" = 1 ]; then lbl="${lbl#★ }"; else starred=1; fi
+    fi
+    row "$1" "$2" "$3" "$lbl" "${5:-}"
+  }
 
-  # best guess first: topen's pick, then the classic per-type guess
-  local how=""
-  if need topen; then
-    how="$(topen -n "$file" 2>/dev/null | sed -n 's/^  opens with: //p')"
-    [ -n "$how" ] && add "Open → $how"
-  fi
-  case "$l" in
-    *.py)          add "Run: python" ;;
-    *.sh|*.bash)   add "Run: bash" ;;
-    *.zsh)         add "Run: zsh" ;;
-    *.js)          add "Run: node" ;;
-    *.html|*.htm)  add "Open in browser" ;;
-    *.apk)         need apkscan && add "Scan with apkscan" ;;
-    *.zip|*.tar|*.tar.*|*.tgz|*.gz|*.bz2|*.xz|*.7z) add "Extract here" ;;
-    *.txt|*.md|*.conf|*.cfg|*.json|*.yml|*.yaml|*.ini|*.log|*.csv) add "View" ;;
-  esac
-  local sb; sb="$(head -c 2 "$file" 2>/dev/null | tr -d '\0')"
-  { [ "$sb" = '#!' ] || [ -x "$file" ]; } && add "Run directly (./$base)"
-  local starred="${#opts[@]}"
-
-  need fkey && add "Commands for this file (fkey)"
-  need fkey && add "What is this? (fkey)"
-  [ "$dir" = "${PREFIX:-/none}/bin" ] && need pkgkey && add "Which package is this from? (pkgkey)"
-  add "View"; add "Edit (nano)"
-  add "Run: bash"; add "Run: python"; add "Run: custom interpreter"
-  add "Install to ~/bin as a command"
-  add "chmod +x only"
-  add "Back"
-  [ "$starred" -gt 0 ] && opts[0]="★ ${opts[0]}"
-
-  choice="$(pick "Actions for: $base" "${opts[@]}")" || return
-  choice="${choice#★ }"
+  choice="$( {
+    # best guess first, starred
+    [ -n "$how" ] && act open "$G_OPEN" OPEN "★ Open" "$how"
+    case "$l" in
+      *.py)          act py   "$G_RUN"  RUN  "★ Run with python" ;;
+      *.sh|*.bash)   act bash "$G_RUN"  RUN  "★ Run with bash" ;;
+      *.zsh)         act zsh  "$G_RUN"  RUN  "★ Run with zsh" ;;
+      *.js)          act node "$G_RUN"  RUN  "★ Run with node" ;;
+      *.html|*.htm)  act web  "$G_OPEN" OPEN "★ Open in browser" ;;
+      *.apk)         need apkscan && act apkscan "$G_INFO" INFO "★ Scan with apkscan" ;;
+      *.zip|*.tar|*.tar.*|*.tgz|*.gz|*.bz2|*.xz|*.7z) act extract "$G_FILE" FILE "★ Extract here" ;;
+      *.txt|*.md|*.conf|*.cfg|*.json|*.yml|*.yaml|*.ini|*.log|*.csv) act view "$G_OPEN" OPEN "★ View" ;;
+    esac
+    { [ "$sb" = '#!' ] || [ -x "$file" ]; } && act direct "$G_RUN" RUN "Run it directly" "./$base"
+    # split screen
+    if [ -n "$od" ] && [ "$od" != "$dir" ]; then
+      act copy "$G_SPLIT" SPLIT "Copy to other pane" "→ ${od##*/}/"
+      act move "$G_SPLIT" SPLIT "Move to other pane" "→ ${od##*/}/"
+    fi
+    case "$pr" in ""|shell|tool|cmd|mon)
+      case "$l" in *.sh|*.bash|*.zsh|*.py|*.js|*.pl|*.rb)
+        act runsplit "$G_SPLIT" SPLIT "Run in split pane" "${pr:+in the $pr}" ;; esac ;;
+    esac
+    [ -z "$pr" ] && act viewsplit "$G_SPLIT" SPLIT "Open in a viewer pane"
+    # open
+    act view "$G_OPEN" OPEN "View" "${vp:+in viewer}"
+    act edit "$G_OPEN" OPEN "Edit (nano)" "${vp:+in viewer}"
+    # run
+    act bash   "$G_RUN" RUN "Run with bash"
+    act py     "$G_RUN" RUN "Run with python"
+    act custom "$G_RUN" RUN "Run with…" "perl, ruby, node…"
+    # info
+    need fkey && act fcmds "$G_INFO" INFO "Commands for this file" "fkey"
+    need fkey && act fwhat "$G_INFO" INFO "What is this?" "fkey"
+    [ "$dir" = "${PREFIX:-/none}/bin" ] && need pkgkey && act which "$G_INFO" INFO "Which package is it from?" "pkgkey"
+    # file
+    act install "$G_FILE" FILE "Install as a command" "~/bin"
+    act chmod   "$G_FILE" FILE "Make executable" "chmod +x"
+    act copyto  "$G_FILE" FILE "Copy to…"
+    act moveto  "$G_FILE" FILE "Move to…"
+    act rename  "$G_FILE" FILE "Rename"
+    act delete  "$C_EXEC" FILE "Delete"
+  } | menu_pick "$base" "★ = best guess · Esc = back")" || return
 
   case "$choice" in
-    "Open → "*)    topen --pause "$file" ;;
-    "Run: bash")   chmod +x "$file" 2>/dev/null; run_in_dir "$dir" bash "$file" ;;
-    "Run: zsh")    chmod +x "$file" 2>/dev/null; run_in_dir "$dir" zsh "$file" ;;
-    "Run: node")   run_in_dir "$dir" node "$file" ;;
-    "Run: python") chmod +x "$file" 2>/dev/null
-                   if need python; then run_in_dir "$dir" python "$file"; else run_in_dir "$dir" python3 "$file"; fi ;;
-    "Run directly"*) chmod +x "$file" 2>/dev/null; run_in_dir "$dir" "./$base" ;;
-    "Run: custom interpreter")
+    open)    open_file open "$file" ;;
+    bash)    chmod +x "$file" 2>/dev/null; run_in_dir "$dir" bash "$file" ;;
+    zsh)     chmod +x "$file" 2>/dev/null; run_in_dir "$dir" zsh "$file" ;;
+    node)    run_in_dir "$dir" node "$file" ;;
+    py)      chmod +x "$file" 2>/dev/null
+             if need python; then run_in_dir "$dir" python "$file"; else run_in_dir "$dir" python3 "$file"; fi ;;
+    direct)  chmod +x "$file" 2>/dev/null; run_in_dir "$dir" "./$base" ;;
+    custom)
       read -r -e -p "Interpreter (e.g. node, perl, ruby): " name
       if [ -n "$name" ] && need "$name"; then run_in_dir "$dir" "$name" "$file"
       else msg "'$name' not found. Nothing was run."; fi ;;
-    "Open in browser") termux-open "$file" 2>/dev/null || termux-open-url "file://$file" ;;
-    "Scan with apkscan") run_in_dir "$dir" apkscan "$file" ;;
-    "Extract here") extract_here "$file" ;;
-    "Commands for this file (fkey)") fkey_menu "$file" ;;
-    "What is this? (fkey)") run_in_dir "$dir" fkey "$file" ;;
-    "Which package is this from? (pkgkey)") run_in_dir "$dir" pkgkey -c "$base" ;;
-    "View")        less -R "$file" ;;
-    "Edit (nano)") nano "$file" ;;
-    "Install to ~/bin as a command")
+    web)     termux-open "$file" 2>/dev/null || termux-open-url "file://$file" ;;
+    apkscan) run_in_dir "$dir" apkscan "$file" ;;
+    extract) extract_here "$file" ;;
+    copy)    xfer cp "$file" "$od" ;;
+    move)    xfer mv "$file" "$od" ;;
+    runsplit) chmod +x "$file" 2>/dev/null; run_in_split "$file" ;;
+    viewsplit) split_open view "$file" ;;
+    fcmds)   fkey_menu "$file" ;;
+    fwhat)   run_in_dir "$dir" fkey "$file" ;;
+    which)   run_in_dir "$dir" pkgkey -c "$base" ;;
+    view)    open_file view "$file" ;;
+    edit)    open_file edit "$file" ;;
+    install)
       read -r -e -p "Command name: " -i "${base%.*}" name
       [ -z "$name" ] && return
       mkdir -p "$HOME/bin"
       if cp "$file" "$HOME/bin/$name" && chmod +x "$HOME/bin/$name"; then
         msg "Installed. Type '$name' from anywhere."
       else msg "Copy failed."; fi ;;
-    "chmod +x only")
+    chmod)
       if chmod +x "$file"; then msg "chmod +x applied to $base."
       else msg "chmod failed on $base (check permissions)."; fi ;;
-    *) : ;;
+    copyto)  local d; d="$(ask_dest)" && xfer cp "$file" "$d" ;;
+    moveto)  local d; d="$(ask_dest)" && xfer mv "$file" "$d" ;;
+    rename)  rename_item "$file" ;;
+    delete)  delete_item "$file" ;;
   esac
 }
 
-# ---------- Menus ----------
+dir_actions() {
+  local d="$1" base="${1##*/}" choice ob="" od="" pr=""
+  set_widths
+  ob="$(partner files)" && od="$(popt "$ob" @tl_dir)"
+  pr="$(partner_role)"
+  choice="$( {
+    row go      "$G_OPEN"  OPEN  "★ Open folder"
+    row other   "$G_SPLIT" SPLIT "Show in other pane" "$([ -n "$pr" ] && role_name "$pr" || echo "opens a split")"
+    row shell   "$G_SPLIT" SPLIT "Shell in this folder" "split"
+    if [ -n "$od" ] && [ "$od" != "${d%/*}" ] && [ "$od" != "$d" ]; then
+      row copy  "$G_SPLIT" SPLIT "Copy to other pane" "→ ${od##*/}/"
+      row move  "$G_SPLIT" SPLIT "Move to other pane" "→ ${od##*/}/"
+    fi
+    row fm      "$G_APPS"  APPS  "Open in a file manager…"
+    row size    "$G_INFO"  INFO  "How big is it?" "du"
+    row copyto  "$G_FILE"  FILE  "Copy to…"
+    row moveto  "$G_FILE"  FILE  "Move to…"
+    row rename  "$G_FILE"  FILE  "Rename"
+    row delete  "$C_EXEC"  FILE  "Delete"
+  } | menu_pick "$base/" "Esc = back")" || return
+  case "$choice" in
+    go)     push_dir "$d" ;;
+    other)  send_folder "$d" ;;
+    shell)  push_dir "$d"; split_open shell ;;
+    copy)   xfer cp "$d" "$od" ;;
+    move)   xfer mv "$d" "$od" ;;
+    fm)     ( NAV_STACK+=("$d"); options_menu ) ;;
+    size)   msg "$(du -sh -- "$d" 2>/dev/null | cut -f1) in $(short "$d") ($(find "$d" -type f 2>/dev/null | wc -l) files)" ;;
+    copyto) local t; t="$(ask_dest)" && xfer cp "$d" "$t" ;;
+    moveto) local t; t="$(ask_dest)" && xfer mv "$d" "$t" ;;
+    rename) rename_item "$d" ;;
+    delete) delete_item "$d" ;;
+  esac
+}
+
+# ---------- Launchers ----------
 HAS_DESK=""
 has_desk() { # checked once: desk as a command, or as a zsh alias/function
   if [ -z "$HAS_DESK" ]; then
@@ -270,12 +838,10 @@ has_desk() { # checked once: desk as a command, or as a zsh alias/function
   fi
   [ "$HAS_DESK" = 1 ]
 }
-
 launch_desk() {
   if need desk; then desk
   else zsh -ic 'desk' || msg "Couldn't find the desk command."; fi
 }
-
 launch_fieldkit() {
   [ -d "$FIELDKIT_DIR" ] || { msg "~/fieldkit not found."; return; }
   if ! pgrep -f "http.server 8080" >/dev/null 2>&1; then
@@ -285,35 +851,36 @@ launch_fieldkit() {
   termux-open-url "http://localhost:8080/index.html"
 }
 
-tools_menu() {
-  local -a tools=(); local t choice
+bin_tools() {
+  local t
   shopt -s nullglob
-  for t in "$HOME/bin"/*; do [ -f "$t" ] && [ -x "$t" ] && tools+=("${t##*/}"); done
+  for t in "$HOME/bin"/*; do [ -f "$t" ] && [ -x "$t" ] && printf '%s\n' "${t##*/}"; done
   shopt -u nullglob
-  [ "${#tools[@]}" -eq 0 ] && { msg "No tools in ~/bin yet."; return; }
-  choice="$(pick "My tools (runs in $(current_dir))" "${tools[@]}" "Back")" || return
-  [ "$choice" = "Back" ] && return
+}
+tools_menu() {
+  local choice t
+  [ -n "$(bin_tools)" ] || { msg "No tools in ~/bin yet."; return; }
+  set_widths
+  choice="$( {
+    while IFS= read -r t; do row "$t" "$G_SETUP" BIN "$t"; done < <(bin_tools)
+  } | menu_pick "My tools (~/bin)" "runs in $(short "$(current_dir)") · Esc = back")" || return
   local -a args=()
   read -r -e -p "Arguments for $choice (Enter for none): " -a args
   run_in_dir "$(current_dir)" "$HOME/bin/$choice" "${args[@]}"
 }
 
-FILE_MANAGERS="yazi mc ranger nnn lf vifm broot clifm fff walk"
-
 options_menu() {
   local fm choice
-  local -a rows=()
-  for fm in $FILE_MANAGERS; do
-    if need "$fm"; then rows+=("✓ $fm"); else rows+=("  $fm  (not installed - Enter installs it)"); fi
-  done
-  need fmget && rows+=("Get file managers (fmget)")
-  rows+=("Back")
-  choice="$(pick "Open $(current_dir) with...   ✓ = installed" "${rows[@]}")" || return
-  case "$choice" in
-    Back) return ;;
-    "Get file managers (fmget)") fmget; msg "" ; return ;;
-  esac
-  fm="$(awk '{print ($1=="✓") ? $2 : $1}' <<<"$choice")"
+  set_widths
+  choice="$( {
+    for fm in $FILE_MANAGERS; do
+      if need "$fm"; then row "$fm" "$G_TOOLS" ON "$fm"
+      else row "$fm" "$C_DIM" GET "$fm" "installs on pick"; fi
+    done
+    need fmget && row fmget "$G_SETUP" SETUP "Get file managers" "fmget"
+  } | menu_pick "Open $(short "$(current_dir)") with" "Esc = back")" || return
+  [ "$choice" = fmget ] && { fmget; msg ""; return; }
+  fm="$choice"
   if ! need "$fm"; then
     if need fmget; then fmget "$fm" || { msg "Install of $fm failed."; return; }
     else pkg install -y "$fm" || { msg "Install of $fm failed."; return; }; fi
@@ -323,22 +890,18 @@ options_menu() {
 }
 
 # ---------- Add-ons: extra tools, installed on first pick ----------
-ADDONS="dropwatch cardkey netkey offset tdoctor clipkey talk sukey"
-ADDON_RAW="https://raw.githubusercontent.com/shaynhahm-lgtm/t-launcher/${T_BRANCH:-main}/addons"
-
 addon_desc() {
   case "$1" in
-    dropwatch) echo "auto-handles new downloads" ;;
+    dropwatch) echo "auto-handles downloads" ;;
     cardkey)   echo "Cardputer over Wi-Fi" ;;
     netkey)    echo "what's on your Wi-Fi" ;;
-    offset)    echo "pipe offset & grade math" ;;
+    offset)    echo "pipe offset & grade" ;;
     tdoctor)   echo "check & fix Termux" ;;
     clipkey)   echo "clipboard history" ;;
     talk)      echo "voice commands" ;;
-    sukey)     echo "near-root via Shizuku" ;;
+    sukey)     echo "near-root (Shizuku)" ;;
   esac
 }
-
 get_addon() { # downloads an add-on into ~/bin (they expect to live there)
   local a="$1" tmp
   mkdir -p "$HOME/bin"; tmp="$HOME/bin/.$a.part"
@@ -350,90 +913,253 @@ get_addon() { # downloads an add-on into ~/bin (they expect to live there)
   [ "$a" = clipkey ] && "$HOME/bin/clipkey" setup
   hash -r
 }
-
+addons_count() { local a n=0; for a in $ADDONS; do need "$a" && n=$((n+1)); done; echo "$n"; }
 addons_menu() {
-  local a choice
+  local a choice last=""
   while true; do
-    local -a rows=()
-    for a in $ADDONS; do
-      if need "$a"; then rows+=("✓ $a  - $(addon_desc "$a")")
-      else rows+=("  $a  - $(addon_desc "$a")  (Enter installs it)"); fi
-    done
-    rows+=("Install all add-ons" "Back")
-    choice="$(pick "Add-ons   ✓ = installed" "${rows[@]}")" || return
-    case "$choice" in
-      Back) return ;;
-      "Install all add-ons")
-        for a in $ADDONS; do need "$a" || get_addon "$a" || echo "Install of $a failed."; done
-        msg "\nDone."; continue ;;
-    esac
-    a="$(awk '{print ($1=="✓") ? $2 : $1}' <<<"$choice")"
+    set_widths
+    choice="$( {
+      for a in $ADDONS; do
+        if need "$a"; then row "$a" "$G_TOOLS" ON "$a" "$(addon_desc "$a")"
+        else row "$a" "$C_DIM" GET "$a" "$(addon_desc "$a")"; fi
+      done
+      row all "$G_SETUP" GET "Install all add-ons" "$(addons_count) of 8 now"
+    } | menu_pick "Add-ons" "GET = installs on pick · Esc = back" "$last")" || return
+    last="$choice"
+    if [ "$choice" = all ]; then
+      for a in $ADDONS; do need "$a" || get_addon "$a" || echo "Install of $a failed."; done
+      msg "\nDone."; continue
+    fi
+    a="$choice"
     if ! need "$a"; then get_addon "$a" || { msg "Install of $a failed."; continue; }; fi
     (cd "$(current_dir)" && "$a")
     msg ""
   done
 }
 
-main_menu() {
-  local hid choice
-  [ "$SHOW_HIDDEN" = 1 ] && hid="Hide hidden files" || hid="Show hidden files"
-  local -a items=()
-  items+=("Add-ons (dropwatch, cardkey, netkey, offset, tdoctor, clipkey, talk, sukey)")
-  need pkgkey && items+=("Packages (pkgkey)")
-  need fkey   && items+=("File types (fkey)")
-  [ -d "$HOME/bin" ]       && items+=("My tools (~/bin)")
-  has_desk                 && items+=("Desktop (XFCE)")
-  [ -d "$FIELDKIT_DIR" ]   && items+=("Fieldkit")
-  need toolkit-sync        && items+=("Sync toolkit to GitHub")
-  items+=("Go to Downloads" "Go to home" "$hid" "Other file managers")
-  need fmget && items+=("Get file managers (fmget)")
-  need topen && items+=("Open-with rules (topen)")
-  items+=("Back")
-  choice="$(pick "Menu" "${items[@]}")" || return
-  case "$choice" in
-    "Add-ons"*)           addons_menu ;;
-    "Packages (pkgkey)")  pkgkey_menu ;;
-    "File types (fkey)")
-      local x; read -r -e -p "Extension or filename (e.g. apk, tar.gz): " x
-      [ -n "$x" ] && { fkey "$x"; msg ""; } ;;
-    "My tools (~/bin)")   tools_menu ;;
-    "Desktop (XFCE)")     launch_desk ;;
-    "Fieldkit")           launch_fieldkit ;;
-    "Sync toolkit to GitHub")
-      if need toolkit-sync; then toolkit-sync; msg "\nSync finished."
-      else msg "toolkit-sync not found in ~/bin."; fi ;;
-    "Go to Downloads")    push_dir "$DL" ;;
-    "Go to home")         push_dir "$HOME" ;;
-    "Show hidden files")  SHOW_HIDDEN=1 ;;
-    "Hide hidden files")  SHOW_HIDDEN=0 ;;
-    "Other file managers") options_menu ;;
-    "Get file managers (fmget)") fmget; msg "" ;;
-    "Open-with rules (topen)")
-      case "$(pick "topen rules" "Show what opens what" "Add my own rules" "Back")" in
-        "Show what opens what") topen -l | less -R ;;
-        "Add my own rules")     topen -e ;;
-      esac ;;
+# ---------- Main menu ----------
+describe() {
+  local d
+  case "$1" in
+    split)    d="Put something next to your files: a second browser to copy/move between, a shell, a viewer, htop, an add-on, or any command." ;;
+    home)     d="Jump to your Termux home folder (~)." ;;
+    dl)       d="Jump to your phone's Download folder, where browsers and apps save files." ;;
+    goto)     d="Type any path (Tab completes it) and jump straight there." ;;
+    mkdir)    d="Make a new folder inside the one you're looking at." ;;
+    addons)   d="Eight optional tools. Not installed yet? Pick one and it installs itself." ;;
+    bin)      d="Run any of your own commands in ~/bin, from the folder you're in." ;;
+    pkgkey)   d="Search every installed package, see the commands it gave you, run them or read their help." ;;
+    fkey)     d="Type an extension (apk, tar.gz…) to see what that file type is and how to work with it." ;;
+    desk)     d="Start the XFCE desktop (your desk command)." ;;
+    fieldkit) d="Serve ~/fieldkit on localhost:8080 and open it in your browser." ;;
+    fm)       d="Open this folder in yazi, mc, ranger, nnn, lf and more. Missing ones install when picked." ;;
+    hidden)   d="Show or hide dotfiles (.config, .zshrc…). Remembered next time." ;;
+    sort)     d="By name, newest first, or biggest first. Newest first is handy in Downloads. Remembered." ;;
+    preview)  d="The bottom pane that shows what's inside a file or folder. Ctrl+P flips it any time; this sets the default." ;;
+    topen)    d="See what opens what, or add your own rules (e.g.  md = glow -p {})." ;;
+    sync)     d="Back up your toolkit to GitHub (toolkit-sync)." ;;
+    update)   d="Download the newest t-launcher and restart into it. Your settings stay." ;;
+    keys)     d="Every key and gesture on one page." ;;
+    split-sw)     d="Jump to the other pane. Tapping it works too, or Ctrl+W from the file list." ;;
+    split-zoom)   d="Make this pane fill the screen. Pick it again to bring the split back." ;;
+    split-swap)   d="Trade places with the other pane." ;;
+    split-flip)   d="Switch between top/bottom and side by side." ;;
+    split-close)  d="Close the other pane and go back to one screen." ;;
+    split-files)  d="A second file browser. Tab on a file → Copy / Move to other pane, Midnight Commander style." ;;
+    split-shell)  d="A normal prompt in the folder you're in. Tab on a script → Run in split pane types it there." ;;
+    split-view)   d="Files you open (Enter, View, Edit) show up over there, so your file list stays put." ;;
+    split-mon)    d="htop: CPU, memory and what's running. Installs itself the first time." ;;
+    split-tool)   d="Run an add-on or one of your ~/bin tools next to your files, like offset or netkey." ;;
+    split-cmd)    d="Type any command, aliases included (serve, myip…). Remembered for next time." ;;
+    split-layout) d="auto = top/bottom on a phone held upright, side by side when the screen is wide." ;;
+    split-size)   d="How much of the screen the file browser gets: 50, 60 or 70%." ;;
+    *) d="" ;;
   esac
+  printf '%s\n' "$d" | fold -s -w "$(( ${FZF_PREVIEW_COLUMNS:-50} - 1 ))"
+}
+
+keys_help() {
+  {
+    echo -e "${C_ACC}t-launcher v$VERSION · keys${C_RESET}\n"
+    echo -e "${G_GO}FILES${C_RESET}"
+    echo -e "  Enter        open it with the right thing"
+    echo -e "  Tab, Ctrl+O  actions for that file or folder"
+    echo -e "  Esc          back one step, like a browser"
+    echo -e "  ..           up one folder"
+    echo -e "  type         search; try  script  dir  .apk"
+    echo -e "  Ctrl+P       preview on / off"
+    echo -e "  Ctrl+R       refresh\n"
+    echo -e "${G_SPLIT}SPLIT SCREEN${C_RESET}"
+    echo -e "  Ctrl+S       split menu"
+    echo -e "  tap a pane   switch to it (t-launcher's own"
+    echo -e "               session; in yours: Ctrl+b o)"
+    echo -e "  Ctrl+W       jump to the other pane"
+    echo -e "  Tab on file  Copy / Move to other pane,"
+    echo -e "               Run in split pane (scripts)"
+    echo -e "  split menu   swap · flip · full screen · close"
+    echo -e "  Leaving t-launcher closes the split"
+    echo -e "  (a shell pane stays open).\n"
+    echo -e "${G_SETUP}MENU${C_RESET}"
+    echo -e "  It's searchable: type  sort  or  go"
+    echo -e "\n${C_DIM}q closes this page${C_RESET}"
+  } | less -R
+}
+
+main_menu() {
+  local choice last="" pr sst nbin nfm fm x
+  while true; do
+    set_widths
+    pr="$(partner_role)"; sst="off"; [ -n "$pr" ] && sst="on: $(role_name "$pr")"
+    nbin="$(bin_tools | wc -l)"
+    nfm=0; for fm in $FILE_MANAGERS; do need "$fm" && nfm=$((nfm+1)); done
+    choice="$( {
+      row split    "$G_SPLIT" SPLIT "Split screen…"      "$sst"
+      row home     "$G_GO"    GO    "Home"               "~"
+      row dl       "$G_GO"    GO    "Downloads"          "${DL##*/}"
+      row goto     "$G_GO"    GO    "Go to folder…"
+      row mkdir    "$G_GO"    GO    "New folder here"
+      row addons   "$G_TOOLS" TOOLS "Add-ons"            "$(addons_count) of 8 installed"
+      [ -d "$HOME/bin" ] && row bin "$G_TOOLS" TOOLS "My tools (~/bin)" "$nbin tools"
+      need pkgkey  && row pkgkey "$G_TOOLS" TOOLS "Packages"   "pkgkey"
+      need fkey    && row fkey   "$G_TOOLS" TOOLS "File types" "fkey"
+      has_desk     && row desk   "$G_APPS"  APPS  "Desktop (XFCE)"
+      [ -d "$FIELDKIT_DIR" ] && row fieldkit "$G_APPS" APPS "Fieldkit" "localhost:8080"
+      row fm       "$G_APPS"  APPS  "Other file managers" "$nfm installed"
+      row hidden   "$G_VIEW"  VIEW  "Hidden files"       "$([ "$SHOW_HIDDEN" = 1 ] && echo shown || echo hidden)"
+      row sort     "$G_VIEW"  VIEW  "Sort"               "$(case $SORT in newest) echo "newest first";; biggest) echo "biggest first";; *) echo "by name";; esac)"
+      row preview  "$G_VIEW"  VIEW  "Preview pane"       "$([ "$PREVIEW_ON" = 1 ] && echo on || echo off)"
+      need topen   && row topen "$G_SETUP" SETUP "Open-with rules" "topen"
+      need toolkit-sync && row sync "$G_SETUP" SETUP "Sync toolkit to GitHub"
+      row update   "$G_SETUP" SETUP "Update t-launcher"  "v$VERSION"
+      row keys     "$G_SETUP" SETUP "Keys & tips"
+    } | MP="bash $QSELF --describe {1}" menu_pick "Menu" "type to search · Esc = back" "$last")" || return
+    last="$choice"
+    case "$choice" in
+      split)    split_menu; return ;;
+      home)     push_dir "$HOME"; return ;;
+      dl)       push_dir "$DL"; return ;;
+      goto)
+        read -r -e -p "Go to: " -i "$(short "$(current_dir)")/" x
+        x="${x/#\~/$HOME}"
+        if [ -d "$x" ]; then push_dir "$(readlink -f "$x")"; return; else msg "Not a folder: $x"; fi ;;
+      mkdir)
+        read -r -e -p "New folder name: " x
+        [ -n "$x" ] || continue
+        if mkdir -p -- "$(current_dir)/$x"; then refresh_partner; return; else msg "Couldn't create $x"; fi ;;
+      addons)   addons_menu ;;
+      bin)      tools_menu ;;
+      pkgkey)   pkgkey_menu ;;
+      fkey)
+        read -r -e -p "Extension or filename (e.g. apk, tar.gz): " x
+        [ -n "$x" ] && { fkey "$x"; msg ""; } ;;
+      desk)     launch_desk ;;
+      fieldkit) launch_fieldkit ;;
+      fm)       options_menu ;;
+      hidden)   SHOW_HIDDEN=$((1 - SHOW_HIDDEN)); save_settings ;;
+      sort)     case "$SORT" in name) SORT=newest ;; newest) SORT=biggest ;; *) SORT=name ;; esac; save_settings ;;
+      preview)  PREVIEW_ON=$((1 - PREVIEW_ON)); save_settings ;;
+      topen)
+        case "$(pick "topen" "Show what opens what" "Add my own rules")" in
+          "Show what opens what") topen -l | less -R ;;
+          "Add my own rules")     topen -e ;;
+        esac ;;
+      sync)     toolkit-sync; msg "\nSync finished." ;;
+      update)   update_self ;;
+      keys)     keys_help ;;
+    esac
+  done
+}
+
+update_self() {
+  need curl || { msg "Needs curl: pkg install curl"; return; }
+  echo -e "${C_ACC}Updating t-launcher...${C_RESET}"
+  if curl -fsSL "$RAW_BASE/install.sh" | bash; then
+    save_settings
+    echo "Restarting..."; sleep 1
+    exec bash "$SELF" "$(current_dir)"
+  else msg "Update failed (no connection?)."; fi
 }
 
 # ---------- Main loop ----------
+make_header() { # make_header COUNT SPLIT(0/1)
+  local extra="" keys
+  [ "$SHOW_HIDDEN" = 1 ] && extra+=" · +hidden"
+  case "$SORT" in newest) extra+=" · newest" ;; biggest) extra+=" · biggest" ;; esac
+  if [ "$2" = 1 ]; then  # the pane's title bar already shows the folder
+    printf '%s' "$1 $([ "$1" = 1 ] && echo item || echo items)$extra · Tab actions · ^S · ^W"
+  else
+    keys="Enter open · Tab actions · ^S split · Esc back"
+    need topen || keys="Enter actions · ^S split · Esc back"
+    printf '%s\n%s' "$(short "$LAUNCH_CUR") · $1 $([ "$1" = 1 ] && echo item || echo items)$extra" "$keys"
+  fi
+}
+count_entries() {
+  local -a fa=(-mindepth 1 -maxdepth 1); [ "$SHOW_HIDDEN" = 1 ] || fa+=(-not -name '.*')
+  find "$1" "${fa[@]}" -printf . 2>/dev/null | wc -c
+}
+RELOAD="reload(bash $QSELF --list)"
+[ "$FZF_V" -ge 45 ] && RELOAD+="+transform-header(bash $QSELF --header)"
+
+cleanup() { # leaving: close the helper panes this browser opened (a shell stays)
+  # only on a normal exit; if the pane was swapped out (respawned) leave it alone
+  in_tmux && [ "${NORMAL_EXIT:-}" = 1 ] || return 0
+  local p r x
+  if [ -n "${TL_SECOND:-}" ]; then helper_exit
+  else
+    for p in $(others); do
+      r="$(popt "$p" @tl_role)"
+      [ -n "$r" ] && [ "$r" != shell ] && tm kill-pane -t "$p"
+    done
+    unstyle_window
+  fi
+  for x in @tl_role @tl_label @tl_dir @tl_list; do tm set -pu -t "$MYPANE" "$x"; done
+}
+
 main() {
   need fzf || { echo -e "${C_EXEC}fzf is not installed.${C_RESET} Run: pkg install fzf"; exit 1; }
-  local out key sel base target hdr up keys
-  need topen && keys="Enter = open, Tab = actions" || keys="Enter = actions"
+  local out key sel base target hdr up rc listing count keys
+  if in_tmux; then setp @tl_role files; trap cleanup EXIT; fi
+  [ "${TL_OWNED:-}" = 1 ] && in_tmux && style_session
+  if [ -n "${PENDING_SPLIT:-}" ]; then split_open "$PENDING_SPLIT" "${PENDING_ARG:-}"; PENDING_SPLIT=""; fi
 
   while true; do
     export LAUNCH_CUR; LAUNCH_CUR="$(current_dir)"
-    hdr="$LAUNCH_CUR"; [ "$SHOW_HIDDEN" = 1 ] && hdr+="  [hidden on]"
-    out="$(build_listing "$LAUNCH_CUR" | fzf --ansi --delimiter '\t' --with-nth=1,2 \
-      --header="$hdr"$'\n'"$keys, Esc = back, Ctrl+P = preview" --height=95% --reverse \
-      --expect=tab,ctrl-o --preview "$PREVIEW" --preview-window=down,40% --bind 'ctrl-p:toggle-preview')"
+    if [ ! -d "$LAUNCH_CUR" ]; then # folder vanished (moved/deleted): step back
+      if [ "${#NAV_STACK[@]}" -gt 1 ]; then pop_dir; else NAV_STACK=("$HOME"); fi
+      continue
+    fi
+    if in_tmux; then setp @tl_dir "$LAUNCH_CUR"; setp @tl_label "FILES $(short "$LAUNCH_CUR")"; fi
+
+    listing="$(build_listing "$LAUNCH_CUR"; printf '\034%s' "$LIST_COUNT")"
+    count="${listing##*$'\034'}"; listing="${listing%$'\034'*}"; listing="${listing%$'\n'}"
+
+    local split=0 rows
+    split_active && split=1
+    hdr="$(make_header "$count" "$split")"
+    read -r rows _ < <(stty size </dev/tty 2>/dev/null); [[ ${rows:-} =~ ^[0-9]+$ ]] || rows=40
+
+    local -a o=("${FZF_STYLE[@]}" --delimiter=$'\t' --with-nth=1
+      --header="$hdr" --expect=tab,ctrl-o,ctrl-s
+      --preview "bash $QSELF --preview {2}" --bind 'ctrl-p:toggle-preview'
+      --bind "f5:$RELOAD,ctrl-r:$RELOAD")
+    # short pane (phone split): preview starts hidden, Ctrl+P still shows it
+    if [ "$PREVIEW_ON" = 1 ] && [ "$rows" -ge 30 ]; then o+=(--preview-window=down,40%,border-top)
+    else o+=(--preview-window=down,50%,border-top,hidden); fi
+    in_tmux && o+=(--bind 'ctrl-w:execute-silent(tmux select-pane -t :.+)')
+    if [ "$split" = 1 ]; then o+=(--border=none)
+    elif has_labels; then o+=(--border-label=" t-launcher "); fi
+
+    setp @tl_list 1
+    out="$(printf '%s\n' "$listing" | fzf "${o[@]}")"; rc=$?
+    setp @tl_list 0
     key="${out%%$'\n'*}"
     sel=""; [[ $out == *$'\n'* ]] && sel="${out#*$'\n'}"
 
-    if [ -z "$sel" ]; then
+    if [ "$key" = ctrl-s ]; then split_menu; continue; fi
+    if [ "$rc" = 130 ]; then
       if [ "${#NAV_STACK[@]}" -gt 1 ]; then pop_dir; continue; else break; fi
     fi
+    [ -n "$sel" ] || continue
 
     base="${sel#*$'\t'}"
     case "$base" in
@@ -441,16 +1167,33 @@ main() {
         up="$(dirname "$LAUNCH_CUR")"
         if [ "${#NAV_STACK[@]}" -gt 1 ] && [ "${NAV_STACK[-2]}" = "$up" ]; then pop_dir
         else push_dir "$up"; fi ;;
-      "$MENU_ENTRY") main_menu ;;
+      "$MENU_KEY") main_menu ;;
       *)
         target="${LAUNCH_CUR%/}/$base"
-        if [ -d "$target" ]; then push_dir "$target"
-        elif [ -e "$target" ]; then
-          if [ -z "$key" ] && need topen; then topen --pause "$target"
-          else run_action_menu "$target"; fi
+        if [ -d "$target" ]; then
+          if [ -n "$key" ]; then dir_actions "$target"; else push_dir "$target"; fi
+        elif [ -e "$target" ] || [ -L "$target" ]; then
+          if [ -z "$key" ] && need topen; then open_file open "$target"
+          else file_actions "$target"; fi
         else msg "That entry no longer exists - refreshing."; fi ;;
     esac
   done
+  NORMAL_EXIT=1
 }
 
-main
+# ---------- Entry points ----------
+case "${1:-}" in
+  --list)        build_listing "${LAUNCH_CUR:-$PWD}"; exit 0 ;;
+  --header)      LAUNCH_CUR="${LAUNCH_CUR:-$PWD}"; s=0; split_active && s=1
+                 make_header "$(count_entries "$LAUNCH_CUR")" "$s"; exit 0 ;;
+  --preview)     do_preview "${2:-}"; exit 0 ;;
+  --describe)    describe "${2:-}"; exit 0 ;;
+  --viewer-idle) viewer_idle; exit 0 ;;
+  --view)        viewer_open "${2:-open}" "${3:-}" "${4:-}"; exit 0 ;;
+  --monitor)     monitor_pane; helper_exit; exit 0 ;;
+  --run-pane)    run_pane "${2:-cmd}" "${3:-}"; exit 0 ;;
+  --pane)        [ -d "${2:-}" ] && NAV_STACK=("$(readlink -f "$2")"); TL_SECOND=1; main ;;
+  --split)       PENDING_SPLIT="${2:-}"; PENDING_ARG="${3:-}"
+                 [ -d "${4:-}" ] && NAV_STACK=("$(readlink -f "$4")"); main ;;
+  *)             [ -d "${1:-}" ] && NAV_STACK=("$(readlink -f "$1")"); main ;;
+esac

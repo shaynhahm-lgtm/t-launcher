@@ -4,7 +4,9 @@
 Browse your files, see what anything is, and open it with the right thing, all from one fuzzy-search menu.
 Comes with **topen** (open any file with the right tool), **fmget** (install the top 10 Termux file managers), **pkgkey** (what can my installed packages do?) and **fkey** (what is this file and how do I use it?), plus eight optional [add-ons](#add-ons).
 
-<img src="screenshots/1.jpg" width="260"> <img src="screenshots/2.jpg" width="260"> <img src="screenshots/3.jpg" width="260"> 
+**New in v8:** [split screen](#split-screen) (Ctrl+S) and a [regrouped menu](#the-menu).
+
+<img src="screenshots/1.jpg" width="260"> <img src="screenshots/2.jpg" width="260"> <img src="screenshots/3.jpg" width="260">
 
 ## Install
 
@@ -34,7 +36,52 @@ Or skip all that: open **MENU → Add-ons** in t-launcher, and anything not inst
 - **Install any script as a command**: turn a script into something you can type from anywhere.
 - **No dead ends**: Esc goes back one step like a browser, and `..` always goes up.
 - **10 file managers, one tap**: open the current folder in yazi, mc, ranger, nnn, lf, vifm, broot, clifm, fff or walk. Not installed yet? Pick it and it installs itself.
-- **Handy shortcuts**: jump to Downloads or home, toggle hidden files.
+- **File basics built in**: copy, move, rename, delete (asks first), new folder. **Tab on a folder** gets its own menu too.
+- **Sort by name, newest or biggest**: newest-first is handy in Downloads. Hidden files, sort and preview settings are remembered.
+
+## Split screen
+
+Press **Ctrl+S** (or **MENU → Split screen**) and pick what goes in the other pane:
+
+| Pick | What you get |
+|---|---|
+| **Second file browser** | Two folders at once. Tab on a file → **Copy / Move to other pane**, Midnight Commander style. Both panes refresh on their own. |
+| **Shell** | A prompt in the folder you're in. Tab on a script → **Run in split pane** types it into that shell. |
+| **Viewer** | Files you open (Enter, View, Edit) show up over there, so your file list stays put. |
+| **System monitor** | htop: CPU, memory, what's running. Installs itself. |
+| **Add-on or tool** | Any add-on or `~/bin` tool next to your files, like `offset` while you look at plans. |
+| **Custom command** | Anything you type, aliases included. Remembered for next time. |
+
+Then: **tap a pane** (or **Ctrl+W**) to switch, and the split menu has **swap**, **flip** (top/bottom ↔ side by side), **full screen**, **size** (50/60/70%) and **close**. Layout is automatic: stacked on a phone held upright, side by side on a wide screen. On a small screen, menus go full screen while you pick and the split comes right back.
+
+<img src="screenshots/5-split-menu.png" width="260"> <img src="screenshots/6-two-browsers.png" width="260"> <img src="screenshots/7-shell.png" width="260">
+
+Runs on tmux, installed for you the first time. Already inside tmux? It splits your current window and leaves your tmux settings alone. Leaving t-launcher closes the split; a shell pane stays open.
+
+## The menu
+
+Grouped and searchable (type `sort`, `go`, `split`…), with live status on the right and a one-line explanation of whatever you highlight:
+
+<img src="screenshots/4-menu.png" width="260">
+
+| Group | What's in it |
+|---|---|
+| **SPLIT** | split screen |
+| **GO** | home, Downloads, go to any folder, new folder |
+| **TOOLS** | add-ons, your `~/bin` tools, pkgkey, fkey |
+| **APPS** | XFCE desktop, Fieldkit, other file managers (each shows only if you have it) |
+| **VIEW** | hidden files, sort, preview pane |
+| **SETUP** | open-with rules, sync, **update t-launcher**, keys & tips |
+
+## Keys
+
+```
+Enter        open it with the right thing      Ctrl+S   split screen
+Tab, Ctrl+O  actions for that file / folder    Ctrl+W   jump to the other pane
+Esc          back one step                     Ctrl+P   preview on / off
+..           up one folder                     Ctrl+R   refresh
+type         search (try: script  dir  .apk)
+```
 
 ## The tools on their own
 
