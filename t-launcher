@@ -8,7 +8,7 @@
 #  - NEW sort by name / newest / biggest; settings remembered between runs
 #  - NEW folder actions (Tab on a folder), copy / move / rename / delete
 #  - Enter opens any file with the right thing (topen); Tab = action menu
-#  - Add-ons: dropwatch, cardkey, netkey, offset, tdoctor, clipkey, talk, sukey
+#  - Add-ons: dropwatch, cardkey, netkey, offset, tdoctor, clipkey, talk, sukey, cleankey
 #  - 10 file managers one tap away (fmget), pkgkey + fkey built in
 #  - ".." always goes up; Esc goes back like a browser
 #
@@ -73,7 +73,8 @@ MENU_LABEL="Menu: split, add-ons, tools, settings"
 FIELDKIT_DIR="$HOME/fieldkit"
 DL="/storage/emulated/0/Download"
 [ -d "$DL" ] || DL="$HOME/storage/downloads"
-ADDONS="dropwatch cardkey netkey offset tdoctor clipkey talk sukey"
+ADDONS="dropwatch cardkey netkey offset tdoctor clipkey talk sukey cleankey"
+NADD=$(set -- $ADDONS; echo $#)
 ADDON_RAW="$RAW_BASE/addons"
 FILE_MANAGERS="yazi mc ranger nnn lf vifm broot clifm fff walk"
 
@@ -750,6 +751,8 @@ file_actions() {
     act copyto  "$G_FILE" FILE "Copy to…"
     act moveto  "$G_FILE" FILE "Move to…"
     act rename  "$G_FILE" FILE "Rename"
+    need cleankey && act ckwhy "$G_INFO" INFO "Safe to delete?" "cleankey"
+    need cleankey && act cktrash "$G_FILE" FILE "Move to trash" "undo-able"
     act delete  "$C_EXEC" FILE "Delete"
   } | menu_pick "$base" "★ = best guess · Esc = back")" || return
 
@@ -791,6 +794,8 @@ file_actions() {
     moveto)  local d; d="$(ask_dest)" && xfer mv "$file" "$d" ;;
     rename)  rename_item "$file" ;;
     delete)  delete_item "$file" ;;
+    ckwhy)   cleankey why "$file"; msg "" ;;
+    cktrash) cleankey trash "$file"; msg ""; refresh_partner ;;
   esac
 }
 
@@ -812,6 +817,8 @@ dir_actions() {
     row copyto  "$G_FILE"  FILE  "Copy to…"
     row moveto  "$G_FILE"  FILE  "Move to…"
     row rename  "$G_FILE"  FILE  "Rename"
+    need cleankey && row ckwhy "$G_INFO" INFO "Safe to delete?" "cleankey"
+    need cleankey && row cktrash "$G_FILE" FILE "Move to trash" "undo-able"
     row delete  "$C_EXEC"  FILE  "Delete"
   } | menu_pick "$base/" "Esc = back")" || return
   case "$choice" in
@@ -826,6 +833,8 @@ dir_actions() {
     moveto) local t; t="$(ask_dest)" && xfer mv "$d" "$t" ;;
     rename) rename_item "$d" ;;
     delete) delete_item "$d" ;;
+    ckwhy)  cleankey why "$d"; msg "" ;;
+    cktrash) cleankey trash "$d"; msg ""; refresh_partner ;;
   esac
 }
 
@@ -900,6 +909,7 @@ addon_desc() {
     clipkey)   echo "clipboard history" ;;
     talk)      echo "voice commands" ;;
     sukey)     echo "near-root (Shizuku)" ;;
+    cleankey)  echo "safe cleanup + undo" ;;
   esac
 }
 get_addon() { # downloads an add-on into ~/bin (they expect to live there)
@@ -923,7 +933,7 @@ addons_menu() {
         if need "$a"; then row "$a" "$G_TOOLS" ON "$a" "$(addon_desc "$a")"
         else row "$a" "$C_DIM" GET "$a" "$(addon_desc "$a")"; fi
       done
-      row all "$G_SETUP" GET "Install all add-ons" "$(addons_count) of 8 now"
+      row all "$G_SETUP" GET "Install all add-ons" "$(addons_count) of $NADD now"
     } | menu_pick "Add-ons" "GET = installs on pick · Esc = back" "$last")" || return
     last="$choice"
     if [ "$choice" = all ]; then
@@ -946,7 +956,7 @@ describe() {
     dl)       d="Jump to your phone's Download folder, where browsers and apps save files." ;;
     goto)     d="Type any path (Tab completes it) and jump straight there." ;;
     mkdir)    d="Make a new folder inside the one you're looking at." ;;
-    addons)   d="Eight optional tools. Not installed yet? Pick one and it installs itself." ;;
+    addons)   d="$NADD optional tools. Not installed yet? Pick one and it installs itself." ;;
     bin)      d="Run any of your own commands in ~/bin, from the folder you're in." ;;
     pkgkey)   d="Search every installed package, see the commands it gave you, run them or read their help." ;;
     fkey)     d="Type an extension (apk, tar.gz…) to see what that file type is and how to work with it." ;;
@@ -1018,7 +1028,7 @@ main_menu() {
       row dl       "$G_GO"    GO    "Downloads"          "${DL##*/}"
       row goto     "$G_GO"    GO    "Go to folder…"
       row mkdir    "$G_GO"    GO    "New folder here"
-      row addons   "$G_TOOLS" TOOLS "Add-ons"            "$(addons_count) of 8 installed"
+      row addons   "$G_TOOLS" TOOLS "Add-ons"            "$(addons_count) of $NADD installed"
       [ -d "$HOME/bin" ] && row bin "$G_TOOLS" TOOLS "My tools (~/bin)" "$nbin tools"
       need pkgkey  && row pkgkey "$G_TOOLS" TOOLS "Packages"   "pkgkey"
       need fkey    && row fkey   "$G_TOOLS" TOOLS "File types" "fkey"

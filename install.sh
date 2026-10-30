@@ -6,14 +6,16 @@
 #   bash install.sh --uninstall          remove everything
 RAW="https://raw.githubusercontent.com/shaynhahm-lgtm/t-launcher/${T_BRANCH:-main}"
 TOOLS="t-launcher pkgkey fkey topen fmget"
-ADDONS="dropwatch cardkey netkey offset tdoctor clipkey talk sukey"   # these live in ~/bin
+ADDONS="dropwatch cardkey netkey offset tdoctor clipkey talk sukey cleankey"   # these live in ~/bin
 if [ "${1:-}" = "--uninstall" ]; then
   for t in $TOOLS; do rm -f "$PREFIX/bin/$t"; done
   [ -x "$HOME/bin/dropwatch" ] && "$HOME/bin/dropwatch" uninstall >/dev/null 2>&1
   [ -x "$HOME/bin/clipkey" ] && "$HOME/bin/clipkey" uninstall >/dev/null 2>&1
   [ -x "$HOME/bin/sukey" ] && "$HOME/bin/sukey" uninstall >/dev/null 2>&1
   for a in $ADDONS; do rm -f "$HOME/bin/$a"; done
-  echo "Removed: $TOOLS $ADDONS"; exit 0
+  echo "Removed: $TOOLS $ADDONS"
+  [ -d "$HOME/.local/share/cleankey/trash" ] && echo "cleankey's trash was kept (your files): ~/.local/share/cleankey/trash and /sdcard/.cleankey-trash"
+  exit 0
 fi
 WANT=""
 if [ "${1:-}" = "--addons" ]; then shift; WANT="${*:-$ADDONS}"; fi

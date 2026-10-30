@@ -2,7 +2,7 @@
 
 **A color-coded file browser and command finder for Termux.**
 Browse your files, see what anything is, and open it with the right thing, all from one fuzzy-search menu.
-Comes with **topen** (open any file with the right tool), **fmget** (install the top 10 Termux file managers), **pkgkey** (what can my installed packages do?) and **fkey** (what is this file and how do I use it?), plus eight optional [add-ons](#add-ons).
+Comes with **topen** (open any file with the right tool), **fmget** (install the top 10 Termux file managers), **pkgkey** (what can my installed packages do?) and **fkey** (what is this file and how do I use it?), plus nine optional [add-ons](#add-ons).
 
 **New in v8:** [split screen](#split-screen) (Ctrl+S) and a [regrouped menu](#the-menu).
 
@@ -109,7 +109,7 @@ fmget -l             what's installed
 
 ## Add-ons
 
-Eight extra tools, each one a single script in [`addons/`](addons). They install to `~/bin`, run on their own or from **MENU → Add-ons**, and install anything they need (nmap, curl, fzf...) the first time you use them.
+Nine extra tools, each one a single script in [`addons/`](addons). They install to `~/bin`, run on their own or from **MENU → Add-ons**, and install anything they need (nmap, curl, fzf...) the first time you use them.
 
 | Add-on | What it does |
 |---|---|
@@ -121,6 +121,7 @@ Eight extra tools, each one a single script in [`addons/`](addons). They install
 | **clipkey** | Clipboard history. Everything you copy while Termux is open gets saved; search it with fzf and copy any clip back. Starts with your shell. Needs Termux:API. |
 | **talk** | Voice commands. Say "launcher", "update" or "network" and it runs the tool. If it doesn't understand, pick the command and it learns that phrase. Needs Termux:API. |
 | **sukey** | Near-root without unlocking the bootloader (no Knox trip). Uses [Shizuku](https://github.com/thedjchi/Shizuku) to give Termux ADB-level shell access, then: stop Android killing Termux (phantom process killer), remove or freeze bloat (reversible), grant app permissions, system-wide ad-blocking DNS, hidden settings editor, APK installs with downgrades, full logcat. Setup pulls `rish` out of the Shizuku app for you; you just pair Shizuku once over Wireless debugging. |
+| **cleankey** | What's safe to delete, and why. Looks through your home folder, `~/bin` and Download and labels everything **KEEP** (Termux or your tools need it), **CHECK** (something uses it, or it's unknown) or **SAFE** (caches, broken links, unfinished or duplicate downloads), showing what uses each item and what it checked. Deleting moves things to a trash with **undo**; nothing is gone until you empty the trash, and it never touches `~/storage`. Also in t-launcher: Tab on any file → *Safe to delete?* / *Move to trash*. |
 
 ```
 dropwatch                    status · start | stop · undo · history · rules
@@ -131,6 +132,7 @@ cardkey                      menu · ls · get · put · flash · boot · wifi �
 clipkey                      pick a clip · clipkey <words> · add · start | stop · clear
 talk                         listen once · talk loop · talk <words> · add · list · edit
 sukey                        menu · setup · start · sh · debloat · restore · freeze · keepalive · adblock on · history
+cleankey                     menu · home | bin | dl · why <file> · trash <file> · undo · list · empty
 ```
 
 Optional extras dropwatch uses if you have them: `apkscan` for APKs and `appdrop` for AppImages. `termux-api` (plus the Termux:API app) turns on notifications and Wi-Fi details.
