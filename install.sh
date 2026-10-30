@@ -48,17 +48,32 @@ if [ -n "$GOT" ]; then
   case " $GOT " in *" clipkey "*) "$HOME/bin/clipkey" setup ;; esac
 fi
 # Older setups run t-launcher through a shell alias to a copy like ~/bin/termux-launcher.sh.
-# Update that copy too (backed up first) so the alias doesn't keep running the old version.
+#  - copy still there: update it too (backed up first) so the alias doesn't run an old version
+#  - copy gone: the alias is broken ("No such file"), so turn that alias line off (rc backed up
+#    first); plain `t-launcher` then runs the installed copy in $PREFIX/bin
+FIXED_ALIAS=""
 for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
-  OLD="$(grep -o 'alias t-launcher=.*' "$rc" 2>/dev/null | grep -o '[^ "'"'"']*launcher[^ "'"'"']*\.sh' | head -1)"
-  OLD="${OLD/#\~/$HOME}"; OLD="${OLD/\$HOME/$HOME}"
-  if [ -n "$OLD" ] && [ -f "$OLD" ]; then
+  [ -f "$rc" ] || continue
+  BACKED=""
+  while IFS=: read -r n line; do
+    OLD="$(printf '%s' "$line" | grep -o '[^ "'"'"']*launcher[^ "'"'"']*\.sh' | head -1)"
+    [ -n "$OLD" ] || continue
+    OLD="${OLD/#\~/$HOME}"; OLD="${OLD/\$HOME/$HOME}"
     mkdir -p "$HOME/.toolkit-backup"
-    cp "$OLD" "$HOME/.toolkit-backup/old-launcher-$(date +%Y%m%d-%H%M%S).sh"
-    cp "$PREFIX/bin/t-launcher" "$OLD" && chmod +x "$OLD" && echo "Also updated $OLD (your t-launcher alias points there)"
-  fi
+    if [ -f "$OLD" ]; then
+      cp "$OLD" "$HOME/.toolkit-backup/old-launcher-$(date +%Y%m%d-%H%M%S).sh"
+      cp "$PREFIX/bin/t-launcher" "$OLD" && chmod +x "$OLD" && echo "Also updated $OLD (your t-launcher alias points there)"
+    else
+      RCNAME="${rc##*/}"
+      [ -n "$BACKED" ] || { cp "$rc" "$HOME/.toolkit-backup/${RCNAME#.}-$(date +%Y%m%d-%H%M%S)"; BACKED=1; }
+      sed -i "${n}s|^|# |; ${n}s|\$|   # turned off by t-launcher installer: file was missing|" "$rc"
+      echo "Fixed: your t-launcher alias in ~/$RCNAME pointed to ~${OLD#"$HOME"}, which is gone. Turned it off (backup in ~/.toolkit-backup)."
+      FIXED_ALIAS=1
+    fi
+  done < <(grep -n '^[[:space:]]*alias t-launcher=' "$rc")
 done
 echo -e "\033[1;32mInstalled!\033[0m  Type: t-launcher   (Ctrl+S = split screen · also: topen <file>, fmget)"
 [ -n "$GOT" ] && echo -e "Add-ons:$GOT   (more in t-launcher → MENU → Add-ons)"
 case " $GOT " in *" sukey "*) echo "sukey needs a one-time Shizuku pairing: run  sukey setup" ;; esac
+[ -n "$FIXED_ALIAS" ] && echo "This Termux window still remembers the old alias: open a new session, or run  unalias t-launcher"
 exit 0
