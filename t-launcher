@@ -6,7 +6,7 @@
 #  - NEW menu, grouped: SPLIT · GO · TOOLS · APPS · VIEW · SETUP, with live
 #    status and a one-line explanation of whatever you highlight
 #  - NEW sort by name / newest / biggest; settings remembered between runs
-#  - NEW folder actions (Tab on a folder), copy / move / rename / delete
+#  - NEW folder actions (Tab on a folder), copy / move / rename / delete (to the trash, undo-able)
 #  - Enter opens any file with the right thing (topen); Tab = action menu
 #  - Add-ons: dropwatch, cardkey, netkey, offset, tdoctor, clipkey, talk, sukey, cleankey
 #  - 10 file managers one tap away (fmget), pkgkey + fkey built in
@@ -595,17 +595,61 @@ extract_here() {
 }
 
 # ---------- File operations ----------
+# Nothing here deletes for good without you typing "delete":
+#  - Delete moves things to cleankey's trash (undo-able); cleankey installs itself the first time
+#  - Replace sets the old copy aside first, and puts it back if the copy/move fails
+#  - Moving to another drive (Termux <-> phone storage) copies, checks every byte, then removes
+ck_ready() { need cleankey || get_addon cleankey; need cleankey; }
+real_path() { # the real place, without following the item itself (links stay links)
+  local d; d="$(cd -- "$(dirname -- "$1")" 2>/dev/null && pwd -P)" || { printf '%s' "$1"; return; }
+  printf '%s/%s' "${d%/}" "${1##*/}"
+}
+same_drive() { # same_drive PATH DIR (unknown counts as different, the careful way)
+  # PATH as itself (a link lives where the link is), DIR followed (~/storage/downloads is a link)
+  local a b; a="$(stat -c %d -- "$1" 2>/dev/null)"; b="$(stat -L -c %d -- "$2" 2>/dev/null)"
+  [ -n "$a" ] && [ "$a" = "$b" ]
+}
+same_copy() { # same_copy A B -> 0 only if B is an exact copy of A
+  if [ -L "$1" ]; then [ -L "$2" ] && [ "$(readlink -- "$1")" = "$(readlink -- "$2")" ]
+  elif [ -d "$1" ]; then need diff && diff -rq --no-dereference -- "$1" "$2" >/dev/null 2>&1
+  else need cmp && cmp -s -- "$1" "$2"; fi
+}
 xfer() { # xfer cp|mv SRC DESTDIR
-  local op="$1" src="$2" ddir="$3" dst
+  local op="$1" src="$2" ddir="$3" dst old="" oldto="" ok=1
   dst="${ddir%/}/${src##*/}"
   [ "$(readlink -f "$src")" = "$(readlink -f "$dst")" ] && { msg "That's the same place."; return 1; }
-  if [ -e "$dst" ]; then
-    confirm "${C_WARN}$(short "$dst") already exists. Replace it?${C_RESET}" || return 1
-    rm -rf -- "$dst" || { msg "Couldn't remove the old one."; return 1; }
+  if [ -e "$dst" ] || [ -L "$dst" ]; then
+    if ck_ready >/dev/null && cleankey where "$dst" >/dev/null; then oldto=trash
+      confirm "${C_WARN}$(short "$dst") already exists. Replace it? (the old one goes to the trash, undo-able)${C_RESET}" || return 1
+    else oldto=gone
+      confirm "${C_WARN}$(short "$dst") already exists. Replace it? The old one will be gone for good.${C_RESET}" || return 1
+    fi
+    old="${ddir%/}/.${dst##*/}.tl-old.$$.$RANDOM"
+    mv -- "$dst" "$old" || { msg "Couldn't set the old one aside, so nothing changed."; return 1; }
   fi
-  if [ "$op" = cp ]; then echo "Copying ${src##*/} → $(short "$ddir") ..."; cp -r -- "$src" "$dst"
-  else echo "Moving ${src##*/} → $(short "$ddir") ..."; mv -- "$src" "$dst"; fi \
-    || { msg "That didn't work (check space and permissions)."; return 1; }
+  if [ "$op" = cp ]; then
+    echo "Copying ${src##*/} → $(short "$ddir") ..."
+    { cp -r -- "$src" "$dst" && same_copy "$src" "$dst"; } || ok=0
+  elif same_drive "$src" "$ddir"; then
+    echo "Moving ${src##*/} → $(short "$ddir") ..."
+    mv -- "$src" "$dst" || ok=0
+  else
+    echo "Moving ${src##*/} → $(short "$ddir") (other drive: copy, check, then remove) ..."
+    if cp -r -- "$src" "$dst" && same_copy "$src" "$dst"; then
+      rm -rf -- "$src" || msg "Moved, but couldn't remove the original $(short "$src")."
+    else ok=0; fi
+  fi
+  if [ "$ok" = 0 ]; then   # clean up our half-done copy (never the original), put the old one back
+    { [ -e "$dst" ] || [ -L "$dst" ]; } && rm -rf -- "$dst"
+    [ -n "$old" ] && mv -- "$old" "$dst"
+    msg "That didn't work (space, permissions, or a name phone storage won't take). Your original is untouched$([ -n "$old" ] && echo ", and the old $(short "$dst") is back")."
+    refresh_partner
+    return 1
+  fi
+  if [ "$oldto" = trash ]; then
+    cleankey stash "$old" "$dst" >/dev/null || msg "Couldn't put the old one in the trash, so it's kept as $(short "$old")."
+  elif [ -n "$old" ]; then rm -rf -- "$old"
+  fi
   refresh_partner
   return 0
 }
@@ -628,10 +672,23 @@ rename_item() {
   mv -- "$p" "${p%/*}/$n" || msg "Rename failed."
   refresh_partner
 }
-delete_item() {
-  local p="$1" what="file"
-  [ -d "$p" ] && what="folder and everything in it"
-  confirm "${C_EXEC}Delete $(short "$p") ($what)? This can't be undone.${C_RESET}" || return
+delete_item() { # to the trash; outside home & Download, typing "delete" removes it for good
+  local p="$1" what="file" a
+  [ -d "$p" ] && [ ! -L "$p" ] && what="folder and everything in it"
+  if ck_ready; then
+    if cleankey where "$p" >/dev/null; then
+      cleankey trash "$p"; msg ""; refresh_partner; return
+    fi
+    case "$(real_path "$p")" in "$HOME"|"$HOME/"*)
+      msg "${C_WARN}Won't delete $(short "$p"):${C_RESET} it's your home folder, the way into phone storage, or the trash itself (empty that with: cleankey empty)."
+      return ;;
+    esac
+    echo -e "${C_WARN}$(short "$p") is outside the trash's area (home folder and Download), so this can't be undone.${C_RESET}"
+  else
+    echo -e "${C_WARN}Couldn't install the trash (cleankey), so this can't be undone.${C_RESET}"
+  fi
+  read -r -p "Type delete to remove this $what for good: " a
+  [ "$a" = delete ] || { msg "Nothing deleted."; return; }
   if rm -rf -- "$p"; then echo "Deleted."; else msg "Delete failed."; fi
   refresh_partner
 }
@@ -752,8 +809,7 @@ file_actions() {
     act moveto  "$G_FILE" FILE "Move to…"
     act rename  "$G_FILE" FILE "Rename"
     need cleankey && act ckwhy "$G_INFO" INFO "Safe to delete?" "cleankey"
-    need cleankey && act cktrash "$G_FILE" FILE "Move to trash" "undo-able"
-    act delete  "$C_EXEC" FILE "Delete"
+    act delete  "$C_EXEC" FILE "Delete" "to trash · undo-able"
   } | menu_pick "$base" "★ = best guess · Esc = back")" || return
 
   case "$choice" in
@@ -795,7 +851,6 @@ file_actions() {
     rename)  rename_item "$file" ;;
     delete)  delete_item "$file" ;;
     ckwhy)   cleankey why "$file"; msg "" ;;
-    cktrash) cleankey trash "$file"; msg ""; refresh_partner ;;
   esac
 }
 
@@ -818,8 +873,7 @@ dir_actions() {
     row moveto  "$G_FILE"  FILE  "Move to…"
     row rename  "$G_FILE"  FILE  "Rename"
     need cleankey && row ckwhy "$G_INFO" INFO "Safe to delete?" "cleankey"
-    need cleankey && row cktrash "$G_FILE" FILE "Move to trash" "undo-able"
-    row delete  "$C_EXEC"  FILE  "Delete"
+    row delete  "$C_EXEC"  FILE  "Delete" "to trash · undo-able"
   } | menu_pick "$base/" "Esc = back")" || return
   case "$choice" in
     go)     push_dir "$d" ;;
@@ -834,7 +888,6 @@ dir_actions() {
     rename) rename_item "$d" ;;
     delete) delete_item "$d" ;;
     ckwhy)  cleankey why "$d"; msg "" ;;
-    cktrash) cleankey trash "$d"; msg ""; refresh_partner ;;
   esac
 }
 

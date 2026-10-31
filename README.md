@@ -36,7 +36,8 @@ Or skip all that: open **MENU → Add-ons** in t-launcher, and anything not inst
 - **Install any script as a command**: turn a script into something you can type from anywhere.
 - **No dead ends**: Esc goes back one step like a browser, and `..` always goes up.
 - **10 file managers, one tap**: open the current folder in yazi, mc, ranger, nnn, lf, vifm, broot, clifm, fff or walk. Not installed yet? Pick it and it installs itself.
-- **File basics built in**: copy, move, rename, delete (asks first), new folder. **Tab on a folder** gets its own menu too.
+- **File basics built in**: copy, move, rename, delete, new folder. **Tab on a folder** gets its own menu too.
+- **Hard to lose things**: Delete moves things to a trash you can undo (it uses the cleankey add-on, which installs itself the first time). Replacing a file sets the old one aside and puts it back if anything fails. Moving between Termux and phone storage copies, checks every byte, and only then removes the original. The only permanent delete is outside your home folder and Download, and that one makes you type `delete`.
 - **Sort by name, newest or biggest**: newest-first is handy in Downloads. Hidden files, sort and preview settings are remembered.
 
 ## Split screen
@@ -121,7 +122,7 @@ Nine extra tools, each one a single script in [`addons/`](addons). They install 
 | **clipkey** | Clipboard history. Everything you copy while Termux is open gets saved; search it with fzf and copy any clip back. Starts with your shell. Needs Termux:API. |
 | **talk** | Voice commands. Say "launcher", "update" or "network" and it runs the tool. If it doesn't understand, pick the command and it learns that phrase. Needs Termux:API. |
 | **sukey** | Near-root without unlocking the bootloader (no Knox trip). Uses [Shizuku](https://github.com/thedjchi/Shizuku) to give Termux ADB-level shell access, then: stop Android killing Termux (phantom process killer), remove or freeze bloat (reversible), grant app permissions, system-wide ad-blocking DNS, hidden settings editor, APK installs with downgrades, full logcat. Setup pulls `rish` out of the Shizuku app for you; you just pair Shizuku once over Wireless debugging. |
-| **cleankey** | What's safe to delete, and why. Looks through your home folder, `~/bin` and Download and labels everything **KEEP** (Termux or your tools need it), **CHECK** (something uses it, or it's unknown) or **SAFE** (caches, broken links, unfinished or duplicate downloads), showing what uses each item and what it checked. Deleting moves things to a trash with **undo**; nothing is gone until you empty the trash, and it never touches `~/storage`. Also in t-launcher: Tab on any file → *Safe to delete?* / *Move to trash*. |
+| **cleankey** | What's safe to delete, and why. Looks through your home folder, `~/bin` and Download and labels everything **KEEP** (Termux or your tools need it), **CHECK** (something uses it, or it's unknown) or **SAFE** (caches, broken links, unfinished or duplicate downloads), showing what uses each item and what it checked. Anything it can't identify is CHECK, never SAFE, and "used by" follows your shell startup files through every script they load. Keys and passwords (`.ssh`, `.gnupg`, `.git-credentials`, `.netrc`…) are **locked**: cleankey won't move them at all. Deleting moves things to a trash with **undo**; nothing is gone until you empty the trash, and it never touches `~/storage`. In t-launcher, **Delete** uses this trash, and Tab on any file → *Safe to delete?* explains it. |
 
 ```
 dropwatch                    status · start | stop · undo · history · rules

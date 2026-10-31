@@ -9,11 +9,14 @@
 #   cleankey list             what's in the trash
 #   cleankey empty            delete the trash for good (asks first)
 #   cleankey scan [where]     plain report, no menus
+#   cleankey where <path>     prints home / bin / dl if the trash can take it (for t-launcher)
 #
 # Every item gets a label, and the reason for it:
 #   KEEP   Termux or your tools need it      (moving it means typing "yes")
+#          keys & passwords are LOCKED: cleankey won't move them at all
 #   CHECK  could be in use, or unknown       (look at "used by" first)
 #   SAFE   caches, broken links, unfinished or duplicate downloads
+#   Anything it can't identify is CHECK, never SAFE.
 #
 # Rules it never breaks:
 #   - nothing is deleted except by "cleankey empty", and that always asks
@@ -26,7 +29,7 @@
 
 set -u
 
-VERSION=1
+VERSION=2
 SELF=$(readlink -f "${BASH_SOURCE[0]}")
 DATA="${XDG_DATA_HOME:-$HOME/.local/share}/cleankey"
 HTRASH="$DATA/trash"                       # trash for things in your home folder
@@ -107,10 +110,12 @@ abspath() {
 
 # ---------- What does something use? ----------
 # One pass over every file that could mention things, saved as  file:line:text
-CHECKED="shell startup files, ~/.termux, ~/.shortcuts, ~/bin, ~/.config, cron"
+CHECKED="shell startup files and every script they load (4 levels deep), ~/.termux, ~/.shortcuts, ~/bin, ~/.config, cron"
 build_corpus() {
   tmpdir
   CORPUS="$TMPD/corpus"; : >"$CORPUS"
+  local seen="$TMPD/corpus.seen" new="$TMPD/corpus.new" round="$TMPD/corpus.round" n
+  : >"$seen"
   {
     local x
     for x in .zshrc .bashrc .profile .bash_profile .zprofile .zshenv .zlogin .bash_aliases .zsh_aliases .p10k.zsh .tmux.conf; do
@@ -119,7 +124,35 @@ build_corpus() {
     find "$HOME/.termux" "$HOME/.shortcuts" "$HOME/bin" "$HOME/.config" -maxdepth 3 \
       -type f -size -512k -print0 2>/dev/null
     find "${PREFIX:-/data/data/com.termux/files/usr}/var/spool/cron" -type f -print0 2>/dev/null
-  } | xargs -0 -r grep -nIH '' -- 2>/dev/null >"$CORPUS"
+  } >"$new"
+  # Then follow the trail: a script that .zshrc sources (or an alias runs) can source
+  # or run others. Those get read too, so nothing in the chain shows up as unused.
+  for n in 1 2 3 4 5; do
+    [ -s "$new" ] || break
+    xargs -0 -r grep -nIH '' -- <"$new" 2>/dev/null >"$round"
+    cat "$round" >>"$CORPUS"
+    tr '\0' '\n' <"$new" >>"$seen"
+    linked_files "$round" "$seen" >"$new"
+  done
+}
+
+# linked_files GREP_OUTPUT SEEN -> NUL list of text files in ~ those lines point at
+linked_files() {
+  local hp f r
+  hp=$(re_escape "$HOME")
+  grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' "$1" 2>/dev/null \
+    | grep -oE "(~|\\\$HOME|\\\$\\{HOME\\}|$hp)/[A-Za-z0-9._/+@-]+" 2>/dev/null \
+    | sed -E "s#^(~|\\\$HOME|\\\$\\{HOME\\}|$hp)/#/#" | sort -u \
+    | while IFS= read -r f; do
+        f="$HOME$f"; f="${f%/}"
+        [ -f "$f" ] || continue
+        r=$(readlink -f -- "$f") || continue
+        case "$r" in "$HOME/storage"|"$HOME/storage/"*) continue ;; "$HOME/"*) ;; *) continue ;; esac   # links never lead us out of ~
+        grep -Fxq -- "$r" "$2" && continue
+        [ "$(wc -c <"$r" 2>/dev/null)" -lt 524288 ] 2>/dev/null || continue
+        printf '%s\n' "$r" >>"$2"
+        printf '%s\0' "$r"
+      done
 }
 
 # refs_for PATH AREA  -> REFS=( "file:line  text" ... ), REFN = count
@@ -188,31 +221,30 @@ kind_of() {
   esac
 }
 
-# ---------- The label, and why ----------
-setl() { LABEL="$1"; WHY="$2"; }
-DUPRE='^(.*[^ ]) ?\(([0-9]+)\)(\.[A-Za-z0-9]+)?$'   # "photo (1).jpg" -> photo .jpg
-classify() { # classify PATH AREA -> LABEL WHY KIND REFS REFN
-  local p="$1" area="$2" b="${1##*/}" o
-  kind_of "$p"
-  refs_for "$p" "$area"
-  setl CHECK "not something I recognize — have a look first"
-  CACHE=0
+# lock_rule PATH-IN-HOME -> keys & passwords are locked, and so is everything inside them
+lock_rule() {
+  case "${1%%/*}" in
+    .ssh)             setl KEEP "locked · SSH keys — can't be recreated" ;;
+    .gnupg)           setl KEEP "locked · encryption keys — can't be recreated" ;;
+    .termux_authinfo) setl KEEP "locked · your Termux SSH login password" ;;
+    .git-credentials) setl KEEP "locked · saved git logins (can hold your GitHub token)" ;;
+    .netrc)           setl KEEP "locked · saved logins that curl and git use" ;;
+    .password-store)  setl KEEP "locked · your saved passwords (pass)" ;;
+    *) return 1 ;;
+  esac
+  LOCKED=1; GENERIC=0
+}
 
-  if [ -L "$p" ] && [ ! -e "$p" ]; then
-    setl SAFE "broken link — what it pointed to is gone"
-  elif [ -L "$p" ]; then
-    setl CHECK "a shortcut (link) — only the link would move, not what it points to"
-  elif [ "$area" = home ]; then
-    case "$b" in
+# home_top NAME -> label for something directly in ~ ; returns 1 if it doesn't know the name
+home_top() {
+  local t="$1"
+  case "$t" in
       .termux)          setl KEEP "Termux's own settings, keys and boot scripts" ;;
-      .ssh)             setl KEEP "SSH keys — can't be recreated" ;;
-      .gnupg)           setl KEEP "encryption keys" ;;
       .config)          setl KEEP "settings for your apps and tools" ;;
       .local)           setl KEEP "tools keep their data here (incl. sukey's undo log)" ;;
       .toolkit-backup)  setl KEEP "backups made by t-launcher's installer" ;;
       .git)             setl KEEP "git history for your home folder" ;;
       bin)              setl KEEP "your own commands (look inside: cleankey bin)" ;;
-      .termux_authinfo) setl KEEP "your Termux SSH login password" ;;
       .shortcuts)       setl KEEP "Termux:Widget home-screen shortcuts" ;;
       .zshrc|.bashrc|.profile|.bash_profile|.zprofile|.zshenv|.zlogin|.bash_aliases|.zsh_aliases|.inputrc|.nanorc|.tmux.conf|.p10k.zsh|.gitconfig|.vimrc|.npmrc|.wgetrc|.curlrc|.gitignore)
                         setl KEEP "settings your shell or apps read" ;;
@@ -225,10 +257,67 @@ classify() { # classify PATH AREA -> LABEL WHY KIND REFS REFN
                         setl SAFE "small history file, recreated automatically" ;;
       .zsh_history|.bash_history|.python_history|.node_repl_history|.sqlite_history)
                         setl CHECK "your command history — Termux won't miss it, but you might" ;;
+      .*.tl-old.*)      setl CHECK "an old copy t-launcher set aside while replacing a file" ;;
       *.part|*.crdownload|*.download|*.tmp)
                         setl SAFE "unfinished download / temp file" ;;
-      .*)               setl CHECK "unknown settings file — leave it unless you know it" ;;
-    esac
+      .*)               setl CHECK "unknown settings file — leave it unless you know it"; return 0 ;;
+      *)                return 1 ;;
+  esac
+  GENERIC=0; return 0
+}
+
+# inner_rules PATH -> better reasons for things that stay CHECK (never makes anything SAFE)
+inner_rules() {
+  local p="$1" b="${1##*/}"
+  case "$b" in
+    .git)         setl CHECK "a git repository's history — the project needs it"; return ;;
+    node_modules) setl CHECK "packages a project installed — reinstallable, but the project needs them"; return ;;
+    venv|.venv)   setl CHECK "a Python environment — programs installed into it need it"; return ;;
+    *.tl-old.*)   setl CHECK "an old copy t-launcher set aside while replacing a file"; return ;;
+  esac
+  case "${b,,}" in
+    *.db|*.sqlite|*.sqlite3|*.db-wal|*.db-shm|*.realm)
+                  setl CHECK "a database — could be an app's saved data"; return ;;
+    *.bak|*.bak[0-9]|*.old|*.orig|*.backup|*~)
+                  setl CHECK "a backup copy — keep it until you're sure"; return ;;
+  esac
+  if [ -d "$p" ] && [ ! -L "$p" ]; then
+    if [ -f "$p/pyvenv.cfg" ]; then setl CHECK "a Python environment — programs installed into it need it"
+    elif [ -e "$p/.git" ]; then setl CHECK "a git project — make sure it's pushed before removing"
+    elif [ -f "$p/package.json" ] || [ -f "$p/Cargo.toml" ] || [ -f "$p/go.mod" ] || [ -f "$p/Makefile" ] || [ -f "$p/setup.py" ] || [ -f "$p/pyproject.toml" ]; then
+      setl CHECK "a code project"
+    fi
+  fi
+}
+
+# ---------- The label, and why ----------
+setl() { LABEL="$1"; WHY="$2"; }
+DUPRE='^(.*[^ ]) ?\(([0-9]+)\)(\.[A-Za-z0-9]+)?$'   # "photo (1).jpg" -> photo .jpg
+classify() { # classify PATH AREA -> LABEL WHY KIND REFS REFN LOCKED
+  local p="$1" area="$2" b="${1##*/}" o
+  kind_of "$p"
+  refs_for "$p" "$area"
+  setl CHECK "not something I recognize — have a look first"; GENERIC=1
+  CACHE=0; LOCKED=0
+
+  if [ "$area" = home ] && lock_rule "${p#"$HOME"/}"; then
+    :   # keys & passwords: locked, whatever they are (even a link)
+  elif [ -L "$p" ] && [ ! -e "$p" ]; then
+    setl SAFE "broken link — what it pointed to is gone"
+  elif [ -L "$p" ]; then
+    setl CHECK "a shortcut (link) — only the link would move, not what it points to"
+  elif [ "$area" = home ]; then
+    local rel="${p#"$HOME"/}" top
+    top="${rel%%/*}"
+    home_top "$top"
+    if [ "$rel" != "$top" ]; then          # something inside a folder in ~
+      if [ "$LABEL" = KEEP ]; then WHY="inside ~/$top: $WHY"
+      elif [ "$CACHE" = 1 ]; then WHY="inside a cache — programs rebuild it when needed"
+      else setl CHECK "inside ~/$top — not something I recognize, have a look first"; inner_rules "$p"
+      fi
+    elif [ "$LABEL" = CHECK ] && [ "$GENERIC" = 1 ]; then
+      inner_rules "$p"
+    fi
   elif [ "$area" = bin ]; then
     case " $ADDONS " in *" $b "*) setl KEEP "t-launcher add-on" ;; *)
       if [ "$b" = rish ] && grep -q 'installed by sukey' "$p" 2>/dev/null; then
@@ -240,7 +329,9 @@ classify() { # classify PATH AREA -> LABEL WHY KIND REFS REFN
     if [[ ${b,,} =~ \.(part|crdownload|download|tmp)$ ]]; then
       setl SAFE "unfinished download"
     elif [ -f "$p" ] && [ ! -s "$p" ]; then
-      setl SAFE "empty file"
+      if [ "$b" = .nomedia ]; then setl CHECK "hides this folder's photos and videos from your gallery"
+      elif [[ $b == .* ]]; then setl CHECK "empty, but hidden files like this are usually markers an app left on purpose"
+      else setl SAFE "empty file"; fi
     elif [ -d "$p" ] && [ -z "$(ls -A -- "$p" 2>/dev/null)" ]; then
       setl SAFE "empty folder"
     elif [[ $b =~ $DUPRE ]] && [ -e "$DL/${BASH_REMATCH[1]}${BASH_REMATCH[3]}" ]; then
@@ -258,7 +349,7 @@ classify() { # classify PATH AREA -> LABEL WHY KIND REFS REFN
       else
         case "${b,,}" in
           *.apk|*.deb|*.appimage) setl CHECK "installer — keep it if you might reinstall" ;;
-          *) setl CHECK "a download — only you know if you still need it" ;;
+          *) setl CHECK "a download — only you know if you still need it"; inner_rules "$p" ;;
         esac
       fi
     fi
@@ -295,6 +386,8 @@ details() { # details PATH AREA KB   (classify must have run)
   printf '\n'
   if [ -z "$(area_of "$p")" ]; then
     printf '%scleankey never moves this one.%s\n' "$R" "$N"
+  elif [ "${LOCKED:-0}" = 1 ]; then
+    printf '%sLocked: cleankey won'"'"'t move this one at all. Keys and passwords can'"'"'t be recreated.%s\n' "$R" "$N"
   elif [ "$LABEL" = KEEP ]; then
     printf '%sMoving it means typing yes. Still goes to the trash, with undo.%s\n' "$D" "$N"
   elif [ "${UI:-1}" = 1 ]; then
@@ -351,9 +444,11 @@ rows_for_fzf() {
 # ---------- Trash ----------
 trash_root_for() { case "$1" in "$SHARED/"*) echo "$STRASH" ;; *) echo "$HTRASH" ;; esac; }
 
-# move_one PATH -> 0 moved, 1 failed (nothing deleted either way)
+# move_one PATH [ORIGINAL] -> 0 moved, 1 failed (nothing deleted either way)
+# ORIGINAL is where undo puts it back (defaults to PATH)
 move_one() {
-  local p="$1" name="${1##*/}" root id dest kb
+  local p="$1" orig="${2:-$1}" name root id dest kb
+  name="${orig##*/}"
   root=$(trash_root_for "$p")
   id="$(date +%Y%m%d-%H%M%S)-$$-$RANDOM"
   dest="$root/$id/$name"
@@ -363,9 +458,9 @@ move_one() {
   if mv -n -- "$p" "$dest" 2>"$root/$id/.err" && [ ! -e "$p" ] && [ ! -L "$p" ] && { [ -e "$dest" ] || [ -L "$dest" ]; }; then
     rm -f -- "$root/$id/.err"
     mkdir -p "$DATA"
-    printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$(date '+%F %R')" "$p" "$dest" "$kb" >>"$LOG"
-    logh "trashed $p"
-    say "${G}✓${N} $(tilde "$p") → trash"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$(date '+%F %R')" "$orig" "$dest" "$kb" >>"$LOG"
+    logh "trashed $orig"
+    say "${G}✓${N} $(tilde "$orig") → trash"
     return 0
   fi
   say "${R}Couldn't move $(tilde "$p") to the trash:${N} $(head -c 200 "$root/$id/.err" 2>/dev/null)"
@@ -391,6 +486,10 @@ trash_paths() {
       continue
     fi
     classify "$p" "$area"
+    if [ "$LOCKED" = 1 ]; then
+      say "${R}Won't move $(tilde "$p"):${N} ${WHY#locked · }. Keys and passwords are locked in cleankey."
+      continue
+    fi
     kb=$(kb_of "$p"); kb=${kb:-0}; tot=$((tot + kb))
     [ "$LABEL" = KEEP ] && keep=$((keep + 1))
     local col; case "$LABEL" in KEEP) col=$B ;; CHECK) col=$Y ;; *) col=$G ;; esac
@@ -500,6 +599,28 @@ cmd_why() {
   else details "$p" "${area:-none}" "${kb:-0}"; fi
 }
 
+cmd_where() { # prints home|bin|dl if the trash can take it, else exits 1
+  local p="${1:-}" a
+  [ -n "$p" ] || exit 1
+  [[ $p == "~/"* ]] && p="$HOME/${p#\~/}"
+  [ -e "$p" ] || [ -L "$p" ] || exit 1
+  p=$(abspath "$p"); a=$(area_of "$p")
+  [ -n "$a" ] || exit 1
+  printf '%s\n' "$a"
+}
+
+# cmd_stash OLD ORIGINAL : t-launcher already asked "replace it?" and set the old copy aside
+# as OLD; this files it in the trash so undo can bring it back. No questions, no labels:
+# keeping the old copy is always safer than deleting it.
+cmd_stash() {
+  local old="${1:-}" orig="${2:-}"
+  [ -n "$old" ] && [ -n "$orig" ] || die "usage: cleankey stash <old copy> <original path>"
+  [ -e "$old" ] || [ -L "$old" ] || die "not found: $old"
+  old=$(abspath "$old"); orig=$(abspath "$orig")
+  [ -n "$(area_of "$old")" ] && [ -n "$(area_of "$orig")" ] || exit 3
+  move_one "$old" "$orig"
+}
+
 cmd_scan() {
   local area="${1:-home}" i
   [ "$area" = dl ] && { storage_ok || die "can't read $DL (run termux-setup-storage)"; }
@@ -581,7 +702,7 @@ main_menu() {
   done
 }
 
-usage() { sed -n '2,25p' "$SELF" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,27p' "$SELF" | sed 's/^# \{0,1\}//'; }
 
 case "${1:-}" in
   "")            main_menu ;;
@@ -592,6 +713,8 @@ case "${1:-}" in
   list)          cmd_list ;;
   empty)         cmd_empty ;;
   scan)          shift; cmd_scan "$@" ;;
+  where)         shift; cmd_where "$@" ;;
+  stash)         shift; cmd_stash "$@" ;;
   --about)       printf 'cleankey\twhat'"'"'s safe to delete, with undo\tfzf\n' ;;
   -v|--version)  echo "cleankey v$VERSION" ;;
   -h|--help|help) usage ;;
