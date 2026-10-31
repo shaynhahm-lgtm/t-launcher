@@ -8,6 +8,7 @@ RAW="https://raw.githubusercontent.com/shaynhahm-lgtm/t-launcher/${T_BRANCH:-mai
 TOOLS="t-launcher pkgkey fkey topen fmget"
 ADDONS="dropwatch cardkey netkey offset tdoctor clipkey talk sukey cleankey"   # these live in ~/bin
 if [ "${1:-}" = "--uninstall" ]; then
+  [ -f "$PREFIX/bin/t-launcher" ] && bash "$PREFIX/bin/t-launcher" --share off >/dev/null 2>&1   # only removes our own share hook
   for t in $TOOLS; do rm -f "$PREFIX/bin/$t"; done
   [ -x "$HOME/bin/dropwatch" ] && "$HOME/bin/dropwatch" uninstall >/dev/null 2>&1
   [ -x "$HOME/bin/clipkey" ] && "$HOME/bin/clipkey" uninstall >/dev/null 2>&1
@@ -28,6 +29,8 @@ for t in $TOOLS; do
   fi
   chmod +x "$PREFIX/bin/$t"
 done
+# Share → Termux → Edit opens files in t-launcher's inbox (skipped if you already have a termux-file-editor)
+bash "$PREFIX/bin/t-launcher" --share auto
 # Add-ons go in ~/bin, next to your own tools
 GOT=""
 for a in $WANT; do
@@ -76,6 +79,7 @@ for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
 done
 echo -e "\033[1;32mInstalled!\033[0m  Type: t-launcher   (Ctrl+S = split screen · also: topen <file>, fmget)"
 [ -n "$GOT" ] && echo -e "Add-ons:$GOT   (more in t-launcher → MENU → Add-ons)"
+[ "$(bash "$PREFIX/bin/t-launcher" --share status 2>/dev/null)" = on ] && echo "Share to t-launcher is on: in any app, Share → Termux → Edit"
 case " $GOT " in *" sukey "*) echo "sukey needs a one-time Shizuku pairing: run  sukey setup" ;; esac
 [ -n "$FIXED_ALIAS" ] && echo "This Termux window still remembers the old alias: open a new session, or run  unalias t-launcher"
 exit 0

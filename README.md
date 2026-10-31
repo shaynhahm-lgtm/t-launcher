@@ -4,7 +4,8 @@
 Browse your files, see what anything is, and open it with the right thing, all from one fuzzy-search menu.
 Comes with **topen** (open any file with the right tool), **fmget** (install the top 10 Termux file managers), **pkgkey** (what can my installed packages do?) and **fkey** (what is this file and how do I use it?), plus nine optional [add-ons](#add-ons).
 
-**New in v8:** [split screen](#split-screen) (Ctrl+S) and a [regrouped menu](#the-menu).
+**New in v9:** [Share to t-launcher](#share-to-t-launcher) (send a file from any app straight into t-launcher), and a safety pass: Delete goes to a trash you can undo, and moves to phone storage are checked byte for byte.
+**v8:** [split screen](#split-screen) (Ctrl+S) and a [regrouped menu](#the-menu).
 
 <img src="screenshots/1.jpg" width="260"> <img src="screenshots/2.jpg" width="260"> <img src="screenshots/3.jpg" width="260">
 
@@ -59,6 +60,23 @@ Then: **tap a pane** (or **Ctrl+W**) to switch, and the split menu has **swap**,
 
 Runs on tmux, installed for you the first time. Already inside tmux? It splits your current window and leaves your tmux settings alone. Leaving t-launcher closes the split; a shell pane stays open.
 
+## Share to t-launcher
+
+In any app (Files, Gallery, your browser's downloads…): **Share → Termux**, then tap **Edit** on Termux's *Save file in ~/downloads/* box. t-launcher opens with the file waiting in its inbox:
+
+<img src="screenshots/8-share.png" width="260">
+
+- **You see what it really is**: name, size, and what the *contents* are (a `.txt` that's really an APK says so), plus a warning if it can run code.
+- **Nothing runs or installs unless you pick it.** Open asks first for scripts and APKs; *Look inside* never runs anything.
+- **Then decide**: move it to Download, home or any folder, install a script as a command, open it, or discard it to the trash (undo-able).
+- **Nothing gets overwritten**: a second `report.pdf` becomes `report (2).pdf`, and *Install as a command* won't replace a command you already have.
+- **No half files**: if copying into the inbox fails, nothing is left behind and the file stays where it was.
+- Files wait in the inbox until you decide: **MENU → Inbox**.
+
+The installer turns this on, unless you already have your own `~/bin/termux-file-editor` (then yours is left alone). **MENU → Share to t-launcher** turns it on or off; turning it on over yours backs yours up first.
+
+Good to know: Termux saves every shared file into `~/downloads` first, and t-launcher moves it from there into the inbox. Termux itself replaces a file in `~/downloads` that has the same name, and Android doesn't tell Termux which app the file came from.
+
 ## The menu
 
 Grouped and searchable (type `sort`, `go`, `split`…), with live status on the right and a one-line explanation of whatever you highlight:
@@ -68,11 +86,11 @@ Grouped and searchable (type `sort`, `go`, `split`…), with live status on the 
 | Group | What's in it |
 |---|---|
 | **SPLIT** | split screen |
-| **GO** | home, Downloads, go to any folder, new folder |
+| **GO** | home, Downloads, go to any folder, new folder, inbox (shared files) |
 | **TOOLS** | add-ons, your `~/bin` tools, pkgkey, fkey |
 | **APPS** | XFCE desktop, Fieldkit, other file managers (each shows only if you have it) |
 | **VIEW** | hidden files, sort, preview pane |
-| **SETUP** | open-with rules, sync, **update t-launcher**, keys & tips |
+| **SETUP** | open-with rules, share to t-launcher on/off, sync, **update t-launcher**, keys & tips |
 
 ## Keys
 

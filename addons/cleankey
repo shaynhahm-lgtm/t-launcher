@@ -302,6 +302,8 @@ classify() { # classify PATH AREA -> LABEL WHY KIND REFS REFN LOCKED
 
   if [ "$area" = home ] && lock_rule "${p#"$HOME"/}"; then
     :   # keys & passwords: locked, whatever they are (even a link)
+  elif [[ $p == "${XDG_DATA_HOME:-$HOME/.local/share}/t-launcher/inbox/"* ]]; then
+    setl CHECK "shared to t-launcher, waiting in its inbox for you to decide"; GENERIC=0
   elif [ -L "$p" ] && [ ! -e "$p" ]; then
     setl SAFE "broken link — what it pointed to is gone"
   elif [ -L "$p" ]; then

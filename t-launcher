@@ -8,6 +8,7 @@
 #  - NEW sort by name / newest / biggest; settings remembered between runs
 #  - NEW folder actions (Tab on a folder), copy / move / rename / delete (to the trash, undo-able)
 #  - Enter opens any file with the right thing (topen); Tab = action menu
+#  - NEW in v9: Share to t-launcher (Share → Termux → Edit lands in an inbox), Delete → trash
 #  - Add-ons: dropwatch, cardkey, netkey, offset, tdoctor, clipkey, talk, sukey, cleankey
 #  - 10 file managers one tap away (fmget), pkgkey + fkey built in
 #  - ".." always goes up; Esc goes back like a browser
@@ -18,7 +19,7 @@
 
 set -uo pipefail
 
-VERSION=8
+VERSION=9
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 QSELF="$(printf '%q' "$SELF")"
 CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/t-launcher"
@@ -693,6 +694,197 @@ delete_item() { # to the trash; outside home & Download, typing "delete" removes
   refresh_partner
 }
 
+# ---------- Share to t-launcher ----------
+# Android: Share → Termux → Edit. Termux copies the file into ~/downloads and runs
+# ~/bin/termux-file-editor with its path; ours hands it to  t-launcher --received.
+# Rules: nothing runs or installs unless you pick it · nothing is overwritten (duplicates get
+# "name (2)") · a file from anywhere but Termux's ~/downloads landing spot is copied, never moved
+# · no half-copied files are left behind · file type comes from the contents, not just the name
+INBOX="${XDG_DATA_HOME:-$HOME/.local/share}/t-launcher/inbox"
+RECEIVE_DIR="$HOME/downloads"          # where Termux puts shared files
+HOOK="$HOME/bin/termux-file-editor"
+HOOK_MARK="# t-launcher share hook"
+unique_name() { # unique_name DIR NAME -> NAME, or "NAME (2)" (before the extension) if taken
+  local d="$1" n="$2" base ext c i=2
+  [ -e "$d/$n" ] || [ -L "$d/$n" ] || { printf '%s' "$n"; return; }
+  case "$n" in
+    ?*.tar.*) base="${n%.tar.*}"; ext=".tar.${n##*.tar.}" ;;
+    ?*.*)     base="${n%.*}"; ext=".${n##*.}" ;;
+    *)        base="$n"; ext="" ;;
+  esac
+  while c="$base ($i)$ext"; [ -e "$d/$c" ] || [ -L "$d/$c" ]; do i=$((i + 1)); done
+  printf '%s' "$c"
+}
+stage_received() { # stage_received FILE -> prints where it now is in the inbox
+  local f="$1" name dest tmp="" land=0
+  [ -f "$f" ] && [ ! -L "$f" ] || return 1
+  mkdir -p "$INBOX" || return 1
+  name="${f##*/}"
+  [ "$(real_path "$f")" = "$(real_path "$RECEIVE_DIR")/$name" ] && land=1   # Termux's landing copy
+  dest="$INBOX/$(unique_name "$INBOX" "$name")"
+  if [ "$land" = 1 ] && same_drive "$f" "$INBOX"; then
+    mv -n -- "$f" "$dest" 2>/dev/null
+    [ -f "$dest" ] && [ ! -e "$f" ] || return 1
+  else
+    tmp="$INBOX/.incoming.$$.$RANDOM"
+    trap 'rm -f -- "$tmp"' INT TERM HUP
+    if cp -- "$f" "$tmp" && cmp -s -- "$f" "$tmp" && mv -n -- "$tmp" "$dest" && [ -f "$dest" ] && [ ! -e "$tmp" ]; then
+      trap - INT TERM HUP
+      [ "$land" = 1 ] && rm -f -- "$f"      # Termux's landing copy; the original stays in the app you shared from
+    else
+      rm -f -- "$tmp"; trap - INT TERM HUP; return 1
+    fi
+  fi
+  printf '%s' "$dest"
+}
+sniff() { # what the contents say (not the name)
+  local f="$1" m
+  if need file; then
+    m="$(file -b -- "$f" 2>/dev/null | sed -E 's#^a (/[^ ]*/)?([^/ ]+) script#\2 script#' | cut -c1-70)"
+    case "$m" in ""|data) ;; *) printf '%s\n' "$m"; return ;; esac   # "data" = file gave up: look ourselves
+  fi
+  m="$(head -c 4 -- "$f" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+  case "$m" in
+    7f454c46) echo "program (ELF binary)" ;;
+    504b0304) echo "zip archive (APK, JAR and DOCX files are zips too)" ;;
+    89504e47) echo "PNG image" ;;  ffd8ff*) echo "JPEG image" ;;
+    25504446) echo "PDF document" ;;  1f8b*) echo "gzip archive" ;;
+    2321*)    echo "script: $(head -n1 -- "$f" | cut -c1-50)" ;;
+    "")       echo "empty" ;;
+    *) if grep -Iq . -- "$f" 2>/dev/null; then echo "text"; else echo "binary data"; fi ;;
+  esac
+}
+can_run() { # 0 if opening it would run code or install something
+  local f="$1" b="${1##*/}" s
+  case "${b,,}" in *.sh|*.bash|*.zsh|*.py|*.js|*.pl|*.rb|*.php|*.lua|*.apk|*.deb|*.appimage|*.jar|*.run|*.bin|*.elf) return 0 ;; esac
+  [ "$(head -c 2 -- "$f" 2>/dev/null)" = "#!" ] && return 0
+  s="$(sniff "$f")"
+  case "${s,,}" in *elf*|*executable*|*script*|*android*|*"debian binary package"*|*java\ archive*) return 0 ;; esac
+  return 1
+}
+install_cmd() { # install_cmd FILE -> copy into ~/bin as a command (never replaces one)
+  local file="$1" name
+  read -r -e -p "Command name: " -i "$(basename -- "${file%.*}")" name
+  [ -n "$name" ] || return 1
+  [[ $name == */* ]] && { msg "Names can't contain /"; return 1; }
+  if [ -e "$HOME/bin/$name" ] || need "$name"; then
+    msg "There's already a command called $name. Pick another name (nothing was changed)."; return 1
+  fi
+  mkdir -p "$HOME/bin"
+  if cp -- "$file" "$HOME/bin/$name" && chmod +x "$HOME/bin/$name"; then
+    msg "Installed. Type '$name' from anywhere."
+  else rm -f -- "$HOME/bin/$name"; msg "Copy failed."; return 1; fi
+}
+inbox_count() { find "$INBOX" -mindepth 1 -maxdepth 1 ! -name '.incoming.*' 2>/dev/null | wc -l; }
+share_status() { # on | off | other (someone else's termux-file-editor)
+  if [ -f "$HOOK" ] && grep -q "$HOOK_MARK" "$HOOK" 2>/dev/null; then echo on
+  elif [ -e "$HOOK" ] || [ -L "$HOOK" ]; then echo other
+  else echo off; fi
+}
+share_on() { # share_on [auto]   auto = only if nothing else is using the hook (installer)
+  local tmp
+  case "$(share_status)" in
+    on) return 0 ;;
+    other)
+      [ "${1:-}" = auto ] && { echo "Share to t-launcher: you already have ~/bin/termux-file-editor, so it was left alone (turn it on in MENU → Share to t-launcher)."; return 1; }
+      confirm "You already have ~/bin/termux-file-editor (something else handles shared files). Replace it? Yours gets backed up." || return 1
+      mkdir -p "$HOME/.toolkit-backup" && cp -P -- "$HOOK" "$HOME/.toolkit-backup/termux-file-editor-$(date +%Y%m%d-%H%M%S)" || { msg "Backup failed, so nothing was changed."; return 1; } ;;
+  esac
+  mkdir -p "$HOME/bin"; tmp="$HOME/bin/.termux-file-editor.$$"
+  cat >"$tmp" <<HOOKEOF || { rm -f "$tmp"; return 1; }
+#!${PREFIX:-/data/data/com.termux/files/usr}/bin/bash
+$HOOK_MARK: Share → Termux → Edit opens the file in t-launcher's inbox.
+# Turn it off: t-launcher --share off   (or MENU → Share to t-launcher)
+export PATH="\$HOME/bin:\$PATH"
+for t in "${PREFIX:-/data/data/com.termux/files/usr}/bin/t-launcher" "\$HOME/bin/t-launcher"; do
+  [ -f "\$t" ] && exec bash "\$t" --received "\$@"
+done
+echo "t-launcher isn't installed any more, so the file is just in ~/downloads."; read -rsn1
+HOOKEOF
+  chmod +x "$tmp" && mv -f -- "$tmp" "$HOOK"
+}
+share_off() {
+  local b
+  [ "$(share_status)" = on ] || return 0
+  rm -f -- "$HOOK"
+  b="$(ls -t "$HOME/.toolkit-backup"/termux-file-editor-* 2>/dev/null | head -1)"
+  if [ -n "$b" ] && [ -t 0 ] && confirm "Put back your old termux-file-editor ($(short "$b"))?"; then cp -P -- "$b" "$HOOK"; fi
+  return 0
+}
+share_menu() {
+  case "$(share_status)" in
+    on)    confirm "Share to t-launcher is on. Turn it off?" && share_off && msg "Off. Share → Termux → Edit won't open t-launcher now." ;;
+    *)     share_on && msg "On. In any app: Share → Termux, then tap ${C_ACC}Edit${C_RESET}. The file lands in t-launcher's inbox and nothing runs until you pick something." ;;
+  esac
+}
+shared_line() { # shared_line LABEL VALUE WIDTH -> "label     value", long values wrap
+  local first=1 l
+  while IFS= read -r l; do
+    if [ "$first" = 1 ]; then printf '%b%-9s%b %s\n' "$C_DIM" "$1" "$C_RESET" "$l"; first=0
+    else printf '%-9s %s\n' "" "$l"; fi
+  done < <(printf '%b\n' "$2" | fold -s -w "$3")
+}
+received_screen() { # received_screen FILE  (from the share hook)
+  local f="$1" st name kind named runs choice d warn=""
+  set_widths; clear
+  if ! st="$(stage_received "$f")"; then
+    msg "${C_WARN}Couldn't put $(short "$f") in the inbox.${C_RESET} It's still where Termux saved it, untouched."
+    return 1
+  fi
+  name="${st##*/}"
+  kind="$(sniff "$st" | sed -E 's#^(.)#\u\1#')"
+  named="$( { need topen && topen -n "$st" 2>/dev/null | sed -n 's/^ *is: *//p'; } | head -1)"
+  runs=0; can_run "$st" && runs=1
+  [ "$name" != "${f##*/}" ] && warn="(renamed: the inbox already had a ${f##*/})"
+  local w info sz
+  w=$(( $(cols) - 14 )); ((w < 20)) && w=20
+  sz="$(du -h -- "$st" 2>/dev/null | cut -f1)"; [ -s "$st" ] || sz="empty: the share may not have finished"
+  info="$( {
+    shared_line "name"     "$name" "$w"
+    [ -n "$warn" ] && shared_line ""      "$warn" "$w"
+    shared_line "size"     "$sz" "$w"
+    shared_line "contents" "$kind" "$w"
+    [ -n "$named" ] && shared_line "name says" "$named" "$w"
+    shared_line "arrived"  "$(date -r "$st" '+%b %d %H:%M' 2>/dev/null)" "$w"
+    [ "$runs" = 1 ] && echo -e "${C_WARN}Can run code: only if you pick Open${C_RESET}"
+    echo -e "${C_DIM}Nothing runs until you pick. Esc = keep.${C_RESET}"
+  } )"
+  while true; do
+    clear
+    choice="$( {
+      row view    "$G_INFO" LOOK  "Look inside"            "never runs it"
+      if [ "$runs" = 1 ]; then row open "$C_EXEC" OPEN "Open / run it" "asks first"
+      else row open "$G_INFO" OPEN "Open it" "right app"; fi
+      row dl      "$G_GO"   MOVE  "Move to Download"
+      row home    "$G_GO"   MOVE  "Move to home (~)"
+      row moveto  "$G_GO"   MOVE  "Move to…"
+      [ "$runs" = 1 ] && row install "$G_FILE" FILE "Install as a command" "into ~/bin"
+      row browse  "$G_TOOLS" GO   "Show in t-launcher"
+      row discard "$C_EXEC" FILE  "Discard"                "trash (undo)"
+      row keep    "$G_VIEW" DONE  "Leave it in the inbox"
+    } | menu_pick "Shared: $name" "$info")" || choice=keep
+    case "$choice" in
+      view)
+        if [ -s "$st" ] && grep -Iq . -- "$st" 2>/dev/null; then less -R -- "$st"
+        else msg "$( { echo "$kind"; need topen && topen -n "$st" 2>/dev/null | sed 1d; } )\n\nNot text, so there's nothing to show here: Open it, or move it somewhere."; fi ;;
+      open)
+        if [ "$runs" = 1 ]; then
+          need topen && topen -n "$st" 2>/dev/null | sed 1d
+          confirm "${C_WARN}This runs or installs it. Go ahead?${C_RESET}" || continue
+        fi
+        open_file open "$st" ;;
+      dl)      xfer mv "$st" "$DL" && { msg "Moved to $(short "$DL")."; return 0; } ;;
+      home)    xfer mv "$st" "$HOME" && { msg "Moved to ~."; return 0; } ;;
+      moveto)  d="$(ask_dest)" && xfer mv "$st" "$d" && { msg "Moved to $(short "$d")."; return 0; } ;;
+      install) install_cmd "$st" ;;
+      browse)  NAV_STACK=("$INBOX"); main; return 0 ;;
+      discard) delete_item "$st"; [ -e "$st" ] || return 0 ;;
+      keep)    echo -e "\nIt's in the inbox. Find it any time: MENU → Inbox."; sleep 1; return 0 ;;
+    esac
+    [ -e "$st" ] || return 0
+  done
+}
+
 # ---------- fkey: turn its suggestions into runnable commands ----------
 # Loads fkey's own lookup table (no changes to fkey) and captures its commands.
 fkey_cmds() {
@@ -836,13 +1028,7 @@ file_actions() {
     which)   run_in_dir "$dir" pkgkey -c "$base" ;;
     view)    open_file view "$file" ;;
     edit)    open_file edit "$file" ;;
-    install)
-      read -r -e -p "Command name: " -i "${base%.*}" name
-      [ -z "$name" ] && return
-      mkdir -p "$HOME/bin"
-      if cp "$file" "$HOME/bin/$name" && chmod +x "$HOME/bin/$name"; then
-        msg "Installed. Type '$name' from anywhere."
-      else msg "Copy failed."; fi ;;
+    install) install_cmd "$file" ;;
     chmod)
       if chmod +x "$file"; then msg "chmod +x applied to $base."
       else msg "chmod failed on $base (check permissions)."; fi ;;
@@ -1009,6 +1195,8 @@ describe() {
     dl)       d="Jump to your phone's Download folder, where browsers and apps save files." ;;
     goto)     d="Type any path (Tab completes it) and jump straight there." ;;
     mkdir)    d="Make a new folder inside the one you're looking at." ;;
+    inbox)    d="Files you shared to Termux from other apps wait here until you move, open or discard them." ;;
+    share)    d="In any app: Share → Termux → Edit, and the file opens here in an inbox. Nothing runs unless you pick it." ;;
     addons)   d="$NADD optional tools. Not installed yet? Pick one and it installs itself." ;;
     bin)      d="Run any of your own commands in ~/bin, from the folder you're in." ;;
     pkgkey)   d="Search every installed package, see the commands it gave you, run them or read their help." ;;
@@ -1081,6 +1269,7 @@ main_menu() {
       row dl       "$G_GO"    GO    "Downloads"          "${DL##*/}"
       row goto     "$G_GO"    GO    "Go to folder…"
       row mkdir    "$G_GO"    GO    "New folder here"
+      { [ "$(share_status)" = on ] || [ -d "$INBOX" ]; } && row inbox "$G_GO" GO "Inbox (shared files)" "$(inbox_count) waiting"
       row addons   "$G_TOOLS" TOOLS "Add-ons"            "$(addons_count) of $NADD installed"
       [ -d "$HOME/bin" ] && row bin "$G_TOOLS" TOOLS "My tools (~/bin)" "$nbin tools"
       need pkgkey  && row pkgkey "$G_TOOLS" TOOLS "Packages"   "pkgkey"
@@ -1093,6 +1282,7 @@ main_menu() {
       row preview  "$G_VIEW"  VIEW  "Preview pane"       "$([ "$PREVIEW_ON" = 1 ] && echo on || echo off)"
       need topen   && row topen "$G_SETUP" SETUP "Open-with rules" "topen"
       need toolkit-sync && row sync "$G_SETUP" SETUP "Sync toolkit to GitHub"
+      row share    "$G_SETUP" SETUP "Share to t-launcher" "$(share_status)"
       row update   "$G_SETUP" SETUP "Update t-launcher"  "v$VERSION"
       row keys     "$G_SETUP" SETUP "Keys & tips"
     } | MP="bash $QSELF --describe {1}" menu_pick "Menu" "type to search · Esc = back" "$last")" || return
@@ -1109,6 +1299,8 @@ main_menu() {
         read -r -e -p "New folder name: " x
         [ -n "$x" ] || continue
         if mkdir -p -- "$(current_dir)/$x"; then refresh_partner; return; else msg "Couldn't create $x"; fi ;;
+      inbox)    mkdir -p "$INBOX"; push_dir "$INBOX"; return ;;
+      share)    share_menu ;;
       addons)   addons_menu ;;
       bin)      tools_menu ;;
       pkgkey)   pkgkey_menu ;;
@@ -1255,6 +1447,8 @@ case "${1:-}" in
   --view)        viewer_open "${2:-open}" "${3:-}" "${4:-}"; exit 0 ;;
   --monitor)     monitor_pane; helper_exit; exit 0 ;;
   --run-pane)    run_pane "${2:-cmd}" "${3:-}"; exit 0 ;;
+  --received)    received_screen "${2:-}"; exit $? ;;
+  --share)       case "${2:-status}" in on) share_on ;; auto) share_on auto ;; off) share_off ;; *) share_status ;; esac; exit $? ;;
   --pane)        [ -d "${2:-}" ] && NAV_STACK=("$(readlink -f "$2")"); TL_SECOND=1; main ;;
   --split)       PENDING_SPLIT="${2:-}"; PENDING_ARG="${3:-}"
                  [ -d "${4:-}" ] && NAV_STACK=("$(readlink -f "$4")"); main ;;
