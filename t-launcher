@@ -19,7 +19,7 @@
 
 set -uo pipefail
 
-VERSION=9
+VERSION=9.1
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 QSELF="$(printf '%q' "$SELF")"
 CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/t-launcher"
@@ -598,8 +598,12 @@ extract_here() {
 # ---------- File operations ----------
 # Nothing here deletes for good without you typing "delete":
 #  - Delete moves things to cleankey's trash (undo-able); cleankey installs itself the first time
-#  - Replace sets the old copy aside first, and puts it back if the copy/move fails
-#  - Moving to another drive (Termux <-> phone storage) copies, checks every byte, then removes
+#  - Copies (and moves to another drive) go to a hidden temp name first, get checked byte for byte,
+#    and only then take the real name; the original is removed last. Ctrl+C or Termux being killed
+#    mid-copy never leaves a half file under the real name.
+#  - Replace leaves the old copy alone until the new one is complete and checked, then swaps them
+#    (the old one goes to the trash) and puts it back if the swap fails
+#  - Dates and permissions come along wherever the drive allows (phone storage refuses permissions)
 ck_ready() { need cleankey || get_addon cleankey; need cleankey; }
 real_path() { # the real place, without following the item itself (links stay links)
   local d; d="$(cd -- "$(dirname -- "$1")" 2>/dev/null && pwd -P)" || { printf '%s' "$1"; return; }
@@ -615,8 +619,30 @@ same_copy() { # same_copy A B -> 0 only if B is an exact copy of A
   elif [ -d "$1" ]; then need diff && diff -rq --no-dereference -- "$1" "$2" >/dev/null 2>&1
   else need cmp && cmp -s -- "$1" "$2"; fi
 }
+copy_keep() { # copy_keep SRC DST -> an exact copy, checked; dates/permissions kept where the drive allows
+  local err
+  err="$(cp -rp -- "$1" "$2" 2>&1 >/dev/null)"     # phone storage refuses permissions: cp says so, harmlessly
+  same_copy "$1" "$2" && return 0
+  printf '%s\n' "$err" | grep -v 'preserving\|failed to preserve' | grep . | head -3 >&2
+  return 1
+}
+XF_PART="" XF_OLD="" XF_DST="" XF_STOP=0
+xfer_undo() { # back to how things were: drop our half copy, give the old one its name back
+  if [ -n "$XF_PART" ]; then chmod -R u+w -- "$XF_PART" 2>/dev/null; rm -rf -- "$XF_PART"; fi
+  if [ -n "$XF_OLD" ] && { [ -e "$XF_OLD" ] || [ -L "$XF_OLD" ]; } && [ ! -e "$XF_DST" ] && [ ! -L "$XF_DST" ]; then
+    mv -- "$XF_OLD" "$XF_DST"
+  fi
+  XF_PART="" XF_OLD=""
+}
+xfer_fail() { # (called from xfer, so it sees xfer's $oldto)
+  xfer_undo; trap - INT TERM HUP
+  if [ "$XF_STOP" = 1 ]; then msg "Stopped. Nothing was moved or replaced."
+  else msg "That didn't work (space, permissions, or a name phone storage won't take). Your original is untouched$([ -n "${oldto:-}" ] && echo ", and the $(short "$XF_DST") that was already there is as it was")."; fi
+  refresh_partner
+  return 1
+}
 xfer() { # xfer cp|mv SRC DESTDIR
-  local op="$1" src="$2" ddir="$3" dst old="" oldto="" ok=1
+  local op="$1" src="$2" ddir="$3" dst oldto=""
   dst="${ddir%/}/${src##*/}"
   [ "$(readlink -f "$src")" = "$(readlink -f "$dst")" ] && { msg "That's the same place."; return 1; }
   if [ -e "$dst" ] || [ -L "$dst" ]; then
@@ -625,32 +651,37 @@ xfer() { # xfer cp|mv SRC DESTDIR
     else oldto=gone
       confirm "${C_WARN}$(short "$dst") already exists. Replace it? The old one will be gone for good.${C_RESET}" || return 1
     fi
-    old="${ddir%/}/.${dst##*/}.tl-old.$$.$RANDOM"
-    mv -- "$dst" "$old" || { msg "Couldn't set the old one aside, so nothing changed."; return 1; }
   fi
-  if [ "$op" = cp ]; then
-    echo "Copying ${src##*/} → $(short "$ddir") ..."
-    { cp -r -- "$src" "$dst" && same_copy "$src" "$dst"; } || ok=0
-  elif same_drive "$src" "$ddir"; then
+  XF_PART="" XF_OLD="" XF_DST="$dst" XF_STOP=0
+  trap 'XF_STOP=1' INT                          # Ctrl+C: cp stops, the check fails, we tidy up below
+  trap 'xfer_undo; exit 129' HUP TERM           # Termux closing: tidy up and go
+  if [ "$op" = mv ] && same_drive "$src" "$ddir"; then   # same drive: a rename, nothing to copy
     echo "Moving ${src##*/} → $(short "$ddir") ..."
-    mv -- "$src" "$dst" || ok=0
+    if [ -n "$oldto" ]; then
+      XF_OLD="${ddir%/}/.${dst##*/}.tl-old.$$.$RANDOM"
+      mv -- "$dst" "$XF_OLD" || { XF_OLD=""; trap - INT TERM HUP; msg "Couldn't set the old one aside, so nothing changed."; return 1; }
+    fi
+    mv -- "$src" "$dst" || { xfer_fail; return 1; }
   else
-    echo "Moving ${src##*/} → $(short "$ddir") (other drive: copy, check, then remove) ..."
-    if cp -r -- "$src" "$dst" && same_copy "$src" "$dst"; then
-      rm -rf -- "$src" || msg "Moved, but couldn't remove the original $(short "$src")."
-    else ok=0; fi
+    if [ "$op" = cp ]; then echo "Copying ${src##*/} → $(short "$ddir") ..."
+    else echo "Moving ${src##*/} → $(short "$ddir") (other drive: copy, check, then remove) ..."; fi
+    XF_PART="${ddir%/}/.${dst##*/}.tl-part.$$.$RANDOM"
+    copy_keep "$src" "$XF_PART" && [ "$XF_STOP" = 0 ] || { xfer_fail; return 1; }
+    # the new copy is complete and checked: now swap it in (two renames, a split second)
+    if [ -n "$oldto" ]; then
+      XF_OLD="${ddir%/}/.${dst##*/}.tl-old.$$.$RANDOM"
+      mv -- "$dst" "$XF_OLD" || { XF_OLD=""; xfer_fail; return 1; }
+    fi
+    mv -- "$XF_PART" "$dst" || { xfer_fail; return 1; }
+    XF_PART=""
+    if [ "$op" = mv ]; then rm -rf -- "$src" || msg "Moved, but couldn't remove the original $(short "$src")."; fi
   fi
-  if [ "$ok" = 0 ]; then   # clean up our half-done copy (never the original), put the old one back
-    { [ -e "$dst" ] || [ -L "$dst" ]; } && rm -rf -- "$dst"
-    [ -n "$old" ] && mv -- "$old" "$dst"
-    msg "That didn't work (space, permissions, or a name phone storage won't take). Your original is untouched$([ -n "$old" ] && echo ", and the old $(short "$dst") is back")."
-    refresh_partner
-    return 1
-  fi
+  trap - INT TERM HUP
   if [ "$oldto" = trash ]; then
-    cleankey stash "$old" "$dst" >/dev/null || msg "Couldn't put the old one in the trash, so it's kept as $(short "$old")."
-  elif [ -n "$old" ]; then rm -rf -- "$old"
+    cleankey stash "$XF_OLD" "$dst" >/dev/null || msg "Couldn't put the old one in the trash, so it's kept as $(short "$XF_OLD")."
+  elif [ -n "$XF_OLD" ]; then rm -rf -- "$XF_OLD"
   fi
+  XF_OLD=""
   refresh_partner
   return 0
 }

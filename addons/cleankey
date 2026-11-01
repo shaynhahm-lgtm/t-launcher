@@ -258,6 +258,7 @@ home_top() {
       .zsh_history|.bash_history|.python_history|.node_repl_history|.sqlite_history)
                         setl CHECK "your command history — Termux won't miss it, but you might" ;;
       .*.tl-old.*)      setl CHECK "an old copy t-launcher set aside while replacing a file" ;;
+      .*.tl-part.*)     setl CHECK "a half-finished copy t-launcher was making when it got cut off; the original stayed where it was" ;;
       *.part|*.crdownload|*.download|*.tmp)
                         setl SAFE "unfinished download / temp file" ;;
       .*)               setl CHECK "unknown settings file — leave it unless you know it"; return 0 ;;
@@ -330,6 +331,10 @@ classify() { # classify PATH AREA -> LABEL WHY KIND REFS REFN LOCKED
   elif [ "$area" = dl ]; then
     if [[ ${b,,} =~ \.(part|crdownload|download|tmp)$ ]]; then
       setl SAFE "unfinished download"
+    elif [[ $b == .*.tl-part.* ]]; then
+      setl CHECK "a half-finished copy t-launcher was making when it got cut off; the original stayed where it was"
+    elif [[ $b == .*.tl-old.* ]]; then
+      setl CHECK "an old copy t-launcher set aside while replacing a file"
     elif [ -f "$p" ] && [ ! -s "$p" ]; then
       if [ "$b" = .nomedia ]; then setl CHECK "hides this folder's photos and videos from your gallery"
       elif [[ $b == .* ]]; then setl CHECK "empty, but hidden files like this are usually markers an app left on purpose"
