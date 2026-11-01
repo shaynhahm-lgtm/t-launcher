@@ -6,7 +6,7 @@
 #   bash install.sh --uninstall          remove everything
 RAW="https://raw.githubusercontent.com/shaynhahm-lgtm/t-launcher/${T_BRANCH:-main}"
 TOOLS="t-launcher pkgkey fkey topen fmget"
-ADDONS="dropwatch cardkey netkey offset tdoctor clipkey talk sukey cleankey"   # these live in ~/bin
+ADDONS="dropwatch cardkey netkey offset tdoctor clipkey talk sukey cleankey recentkey"   # these live in ~/bin
 if [ "${1:-}" = "--uninstall" ]; then
   [ -f "$PREFIX/bin/t-launcher" ] && bash "$PREFIX/bin/t-launcher" --share off >/dev/null 2>&1   # only removes our own share hook
   for t in $TOOLS; do rm -f "$PREFIX/bin/$t"; done

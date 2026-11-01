@@ -38,7 +38,7 @@ HIST="$DATA/history.log"
 SHARED="${CLEANKEY_SHARED:-/storage/emulated/0}"
 DL="$SHARED/Download"
 STRASH="$SHARED/.cleankey-trash"           # trash for Download, same drive = instant
-ADDONS="dropwatch cardkey netkey offset tdoctor clipkey talk sukey cleankey"
+ADDONS="dropwatch cardkey netkey offset tdoctor clipkey talk sukey cleankey recentkey"
 G=$'\e[1;32m'; Y=$'\e[1;33m'; R=$'\e[1;31m'; B=$'\e[1;34m'; C=$'\e[1;36m'
 D=$'\e[38;5;244m'; W=$'\e[1m'; N=$'\e[0m'
 [ -t 1 ] || { G=; Y=; R=; B=; C=; D=; W=; N=; }

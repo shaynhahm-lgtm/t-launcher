@@ -74,7 +74,7 @@ MENU_LABEL="Menu: split, add-ons, tools, settings"
 FIELDKIT_DIR="$HOME/fieldkit"
 DL="/storage/emulated/0/Download"
 [ -d "$DL" ] || DL="$HOME/storage/downloads"
-ADDONS="dropwatch cardkey netkey offset tdoctor clipkey talk sukey cleankey"
+ADDONS="dropwatch cardkey netkey offset tdoctor clipkey talk sukey cleankey recentkey"
 NADD=$(set -- $ADDONS; echo $#)
 ADDON_RAW="$RAW_BASE/addons"
 FILE_MANAGERS="yazi mc ranger nnn lf vifm broot clifm fff walk"
@@ -423,6 +423,7 @@ refresh_partner() { # make the other browser re-read its folder
 # Open a file in the viewer pane if there is one, otherwise right here
 open_file() { # open_file MODE FILE    MODE = open | view | edit
   local mode="$1" file="$2" v
+  recent_hook add "$mode" "$file"
   if v="$(partner view)"; then
     tm respawn-pane -k -t "$v" -c "${file%/*}" bash "$SELF" --view "$mode" "$file" "$MYPANE"
     tm select-pane -t "$v"
@@ -682,6 +683,7 @@ xfer() { # xfer cp|mv SRC DESTDIR
   elif [ -n "$XF_OLD" ]; then rm -rf -- "$XF_OLD"
   fi
   XF_OLD=""
+  [ "$op" = mv ] && recent_hook moved "$src" "$dst"
   refresh_partner
   return 0
 }
@@ -701,7 +703,7 @@ rename_item() {
   [ -n "$n" ] && [ "$n" != "${p##*/}" ] || return
   [[ $n == */* ]] && { msg "Names can't contain /"; return; }
   [ -e "${p%/*}/$n" ] && { msg "Something called $n is already here."; return; }
-  mv -- "$p" "${p%/*}/$n" || msg "Rename failed."
+  if mv -- "$p" "${p%/*}/$n"; then recent_hook moved "$p" "${p%/*}/$n"; else msg "Rename failed."; fi
   refresh_partner
 }
 delete_item() { # to the trash; outside home & Download, typing "delete" removes it for good
@@ -862,6 +864,7 @@ received_screen() { # received_screen FILE  (from the share hook)
     msg "${C_WARN}Couldn't put $(short "$f") in the inbox.${C_RESET} It's still where Termux saved it, untouched."
     return 1
   fi
+  recent_hook add shared "$st"
   name="${st##*/}"
   kind="$(sniff "$st" | sed -E 's#^(.)#\u\1#')"
   named="$( { need topen && topen -n "$st" 2>/dev/null | sed -n 's/^ *is: *//p'; } | head -1)"
@@ -1180,7 +1183,26 @@ addon_desc() {
     talk)      echo "voice commands" ;;
     sukey)     echo "near-root (Shizuku)" ;;
     cleankey)  echo "safe cleanup + undo" ;;
+    recentkey) echo "recent files" ;;
   esac
+}
+# recentkey (add-on #10, Quinn's): t-launcher tells it what you open, share, move and rename.
+# Only if it's installed, in the background, output thrown away, never waited on: a slow,
+# broken or half-installed recentkey can't slow down or break t-launcher.
+rk_ok() { local p; p="$(command -v recentkey 2>/dev/null)" && [ -f "$p" ] && [ -x "$p" ]; }   # installed and runnable
+recent_hook() { # recent_hook add ACTION PATH | moved OLD NEW
+  rk_ok || return 0
+  ( recentkey "$@" </dev/null >/dev/null 2>&1 & ) 2>/dev/null
+  return 0
+}
+recent_pick() { # MENU → Recent files. "Reveal" hands back DIR<TAB>FILE; go there only if it's really a folder
+  local out d
+  rk_ok || return 1
+  out="$(recentkey pick)" || return 1
+  [[ $out == *$'\t'* && $out != *$'\n'* ]] || return 1
+  d="${out%%$'\t'*}"
+  if [ -d "$d" ] && [ -x "$d" ]; then push_dir "$(readlink -f -- "$d")"; return 0; fi
+  msg "That folder isn't there any more."; return 1
 }
 get_addon() { # downloads an add-on into ~/bin (they expect to live there)
   local a="$1" tmp
@@ -1227,6 +1249,7 @@ describe() {
     goto)     d="Type any path (Tab completes it) and jump straight there." ;;
     mkdir)    d="Make a new folder inside the one you're looking at." ;;
     inbox)    d="Files you shared to Termux from other apps wait here until you move, open or discard them." ;;
+    recent)   d="Files you opened or shared lately. Open one, share it again, or jump to its folder." ;;
     share)    d="In any app: Share → Termux → Edit, and the file opens here in an inbox. Nothing runs unless you pick it." ;;
     addons)   d="$NADD optional tools. Not installed yet? Pick one and it installs itself." ;;
     bin)      d="Run any of your own commands in ~/bin, from the folder you're in." ;;
@@ -1301,6 +1324,7 @@ main_menu() {
       row goto     "$G_GO"    GO    "Go to folder…"
       row mkdir    "$G_GO"    GO    "New folder here"
       { [ "$(share_status)" = on ] || [ -d "$INBOX" ]; } && row inbox "$G_GO" GO "Inbox (shared files)" "$(inbox_count) waiting"
+      rk_ok && row recent "$G_GO" GO "Recent files" "recentkey"
       row addons   "$G_TOOLS" TOOLS "Add-ons"            "$(addons_count) of $NADD installed"
       [ -d "$HOME/bin" ] && row bin "$G_TOOLS" TOOLS "My tools (~/bin)" "$nbin tools"
       need pkgkey  && row pkgkey "$G_TOOLS" TOOLS "Packages"   "pkgkey"
@@ -1331,6 +1355,7 @@ main_menu() {
         [ -n "$x" ] || continue
         if mkdir -p -- "$(current_dir)/$x"; then refresh_partner; return; else msg "Couldn't create $x"; fi ;;
       inbox)    mkdir -p "$INBOX"; push_dir "$INBOX"; return ;;
+      recent)   recent_pick && return ;;
       share)    share_menu ;;
       addons)   addons_menu ;;
       bin)      tools_menu ;;
