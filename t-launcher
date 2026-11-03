@@ -1198,6 +1198,7 @@ recent_hook() { # recent_hook add ACTION PATH | moved OLD NEW
 recent_pick() { # MENU → Recent files. "Reveal" hands back DIR<TAB>FILE; go there only if it's really a folder
   local out d
   rk_ok || return 1
+  [ -n "$(recentkey list 2>/dev/null)" ] || { msg "No recent files yet. Open a file and it shows up here."; return 1; }
   out="$(recentkey pick)" || return 1
   [[ $out == *$'\t'* && $out != *$'\n'* ]] || return 1
   d="${out%%$'\t'*}"
