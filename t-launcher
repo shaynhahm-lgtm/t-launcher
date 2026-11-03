@@ -1250,7 +1250,7 @@ describe() {
     goto)     d="Type any path (Tab completes it) and jump straight there." ;;
     mkdir)    d="Make a new folder inside the one you're looking at." ;;
     inbox)    d="Files you shared to Termux from other apps wait here until you move, open or discard them." ;;
-    recent)   d="Files you opened or shared lately. Open one, share it again, or jump to its folder." ;;
+    recent)   d="The last 20 files you opened, edited or shared in. Pick one to jump to its folder." ;;
     share)    d="In any app: Share → Termux → Edit, and the file opens here in an inbox. Nothing runs unless you pick it." ;;
     addons)   d="$NADD optional tools. Not installed yet? Pick one and it installs itself." ;;
     bin)      d="Run any of your own commands in ~/bin, from the folder you're in." ;;
