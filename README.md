@@ -7,7 +7,7 @@ Comes with **topen** (open any file with the right tool), **fmget** (install the
 **New in v9:** [Share to t-launcher](#share-to-t-launcher) (send a file from any app straight into t-launcher), and a safety pass: Delete goes to a trash you can undo, and moves to phone storage are checked byte for byte.
 **v8:** [split screen](#split-screen) (Ctrl+S) and a [regrouped menu](#the-menu).
 
-<img src="screenshots/1.jpg" width="260"> <img src="screenshots/2.jpg" width="260"> <img src="screenshots/3.jpg" width="260">
+<img src="screenshots/1-browse.png" width="260"> <img src="screenshots/2-actions.png" width="260"> <img src="screenshots/3-recent.png" width="260">
 
 ## Install
 
