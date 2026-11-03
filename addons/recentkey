@@ -86,7 +86,7 @@ in_trash() {
   return 1
 }
 rows() {
-  local ts action p
+  local ts action p d
   [[ -r $HISTORY ]] || return 0
   while IFS=$'\t' read -r ts action p; do
     valid "$p" || continue
@@ -94,14 +94,17 @@ rows() {
     [[ -r $p ]] || continue
     [[ -d ${p%/*} && -x ${p%/*} ]] || continue
     in_trash "$p" && continue
-    printf '%s\t%s\t%s\n' "$p" "$action" "$p"
+    d="${p%/*}"
+    [[ $d == "$HOME" ]] && d="~" || { [[ $d == "$HOME/"* ]] && d="~/${d#"$HOME"/}"; }
+    [[ $d == /storage/emulated/0 ]] && d="/sdcard" || { [[ $d == /storage/emulated/0/* ]] && d="/sdcard/${d#/storage/emulated/0/}"; }
+    printf '%s\t%s\t%s\t%s\n' "$p" "$action" "${p##*/}" "$d"
   done < "$HISTORY"
 }
 pick() {
   command -v fzf >/dev/null 2>&1 || { echo 'recentkey: install fzf (pkg install fzf)' >&2; return 1; }
   local choice p dir
   [[ -n $(rows) ]] || { echo "No recent files yet" >&2; return 1; }
-  choice=$(rows | fzf --reverse --delimiter=$'\t' --with-nth=2,3 \
+  choice=$(rows | fzf --reverse --delimiter=$'\t' --with-nth=3,4 \
     --prompt='recent> ' --header='Enter: reveal file in t-launcher · Esc: back' \
     --no-multi) || return 1
   [[ -n $choice ]] || return 1
@@ -115,7 +118,7 @@ case "${1:-pick}" in
   add) shift; add "$@" ;;
   moved) shift; moved "$@" ;;
   pick) pick ;;
-  list) rows | cut -f3 ;;
+  list) rows | cut -f1 ;;
   clear) lock && { : > "$HISTORY"; unlock; } ;;
   --about) printf 'recentkey\trecent files\tfzf\n' ;;
   -h|--help|help) echo 'recentkey: pick | list | clear | add open|view|edit|shared PATH | moved OLD NEW' ;;
