@@ -1,0 +1,122 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# recentkey — t-launcher recent files (add-on #10)
+# add ACTION PATH | moved OLD NEW | pick | list | clear | --about
+set -u
+DATA="${XDG_DATA_HOME:-$HOME/.local/share}/t-launcher"
+HISTORY="$DATA/recent.tsv"
+LOCK="$DATA/.recentkey.lock"
+MAX=20
+mkdir -p -- "$DATA" || exit 1
+
+# A short-lived directory lock protects the read/modify/replace cycle from
+# concurrent split-pane hooks. Never wait indefinitely in the launcher.
+lock() {
+  local i
+  for ((i=0;i<40;i++)); do
+    if mkdir -- "$LOCK" 2>/dev/null; then
+      trap 'rmdir -- "$LOCK" 2>/dev/null || :' EXIT
+      return 0
+    fi
+    sleep 0.025
+  done
+  return 1
+}
+unlock() { rmdir -- "$LOCK" 2>/dev/null || :; trap - EXIT; }
+absolute() {
+  local p="$1" dir base
+  [[ $p == '~/'* ]] && p="$HOME/${p#\~/}"
+  [[ $p == /* ]] || p="$PWD/$p"
+  dir="${p%/*}"; base="${p##*/}"
+  [[ -n $base && $base != . && $base != .. ]] || return 1
+  # Canonicalize existing parents, including Termux ~/storage symlinks.
+  dir=$(cd -P -- "$dir" 2>/dev/null && pwd -P) || return 1
+  printf '%s/%s\n' "${dir%/}" "$base"
+}
+valid() { [[ -n $1 && $1 != *$'\t'* && $1 != *$'\n'* && $1 != *$'\r'* ]]; }
+# Entries: epoch<TAB>action<TAB>absolute path. Newest first.
+# Filter duplicates by path and cap to 20; temporary file is on same filesystem.
+compact() {
+  local tmp
+  tmp=$(mktemp "$DATA/.recent.XXXXXXXX") || return 1
+  if [[ -f $HISTORY ]]; then
+    awk -F '\t' 'NF==3 && $3!="" && !seen[$3]++ {print; if (++n==20) exit}' "$HISTORY" > "$tmp"
+  fi
+  mv -f -- "$tmp" "$HISTORY"
+}
+add() {
+  local action="${1:-}" path="${2:-}" tmp
+  case "$action" in open|view|edit|shared) ;; *) return 1 ;; esac
+  valid "$path" || return 1
+  path=$(absolute "$path") || return 0
+  [[ -f $path || -L $path ]] || return 0
+  lock || return 0
+  # One atomic append for the event; compaction happens while holding the lock.
+  printf '%s\t%s\t%s\n' "$(date +%s)" "$action" "$path" >> "$HISTORY"
+  # Reverse the append log into newest-first order before deduplication.
+  tmp=$(mktemp "$DATA/.recent.XXXXXXXX") || { unlock; return 1; }
+  tac "$HISTORY" > "$tmp" && mv -f "$tmp" "$HISTORY"
+  compact
+  unlock
+}
+moved() {
+  local old="${1:-}" new="${2:-}" tmp
+  valid "$old" && valid "$new" || return 1
+  # OLD may no longer exist: canonicalize its parent if possible, otherwise
+  # use its lexical absolute form (a moved directory's parent still exists).
+  old=$(absolute "$old") || return 0
+  new=$(absolute "$new") || return 0
+  lock || return 0
+  [[ -f $HISTORY ]] || { unlock; return 0; }
+  tmp=$(mktemp "$DATA/.recent.XXXXXXXX") || { unlock; return 1; }
+  awk -F '\t' -v OFS='\t' -v old="$old" -v new="$new" '
+    NF==3 {if ($3==old) $3=new; else if (index($3,old"/")==1) $3=new substr($3,length(old)+1); print}' "$HISTORY" > "$tmp"
+  mv -f -- "$tmp" "$HISTORY"
+  compact
+  unlock
+}
+# A path in cleankey trash is never offered, even if still accessible.
+in_trash() {
+  local p="$1" id when orig trash kb
+  [[ $p == */cleankey/trash/* || $p == */.cleankey-trash/* ]] && return 0
+  local log="${XDG_DATA_HOME:-$HOME/.local/share}/cleankey/trash.log"
+  [[ -r $log ]] || return 1
+  while IFS=$'\t' read -r id when orig trash kb; do
+    [[ $p == "$orig" || $p == "$orig/"* || $p == "$trash" || $p == "$trash/"* ]] && return 0
+  done < "$log"
+  return 1
+}
+rows() {
+  local ts action p
+  [[ -r $HISTORY ]] || return 0
+  while IFS=$'\t' read -r ts action p; do
+    valid "$p" || continue
+    [[ -f $p || -L $p ]] || continue
+    [[ -r $p ]] || continue
+    [[ -d ${p%/*} && -x ${p%/*} ]] || continue
+    in_trash "$p" && continue
+    printf '%s\t%s\t%s\n' "$p" "$action" "$p"
+  done < "$HISTORY"
+}
+pick() {
+  command -v fzf >/dev/null 2>&1 || { echo 'recentkey: install fzf (pkg install fzf)' >&2; return 1; }
+  local choice p dir
+  choice=$(rows | fzf --reverse --delimiter=$'\t' --with-nth=2,3 \
+    --prompt='recent> ' --header='Enter: reveal file in t-launcher · Esc: back' \
+    --no-multi) || return 1
+  [[ -n $choice ]] || return 1
+  p="${choice%%$'\t'*}"; dir="${p%/*}"
+  [[ -f $p || -L $p ]] && [[ -r $p && -d $dir && -x $dir ]] || return 1
+  in_trash "$p" && return 1
+  # stdout is a machine-readable contract; no other output on success.
+  printf '%s\t%s\n' "$dir" "${p##*/}"
+}
+case "${1:-pick}" in
+  add) shift; add "$@" ;;
+  moved) shift; moved "$@" ;;
+  pick) pick ;;
+  list) rows | cut -f3 ;;
+  clear) lock && { : > "$HISTORY"; unlock; } ;;
+  --about) printf 'recentkey\trecent files\tfzf\n' ;;
+  -h|--help|help) echo 'recentkey: pick | list | clear | add open|view|edit|shared PATH | moved OLD NEW' ;;
+  *) echo 'recentkey: unknown command' >&2; exit 1 ;;
+esac

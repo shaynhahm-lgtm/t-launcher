@@ -128,7 +128,7 @@ fmget -l             what's installed
 
 ## Add-ons
 
-Nine extra tools, each one a single script in [`addons/`](addons). They install to `~/bin`, run on their own or from **MENU → Add-ons**, and install anything they need (nmap, curl, fzf...) the first time you use them.
+Ten extra tools, each one a single script in [`addons/`](addons). They install to `~/bin`, run on their own or from **MENU → Add-ons**, and install anything they need (nmap, curl, fzf...) the first time you use them.
 
 | Add-on | What it does |
 |---|---|
@@ -140,6 +140,7 @@ Nine extra tools, each one a single script in [`addons/`](addons). They install 
 | **clipkey** | Clipboard history. Everything you copy while Termux is open gets saved; search it with fzf and copy any clip back. Starts with your shell. Needs Termux:API. |
 | **talk** | Voice commands. Say "launcher", "update" or "network" and it runs the tool. If it doesn't understand, pick the command and it learns that phrase. Needs Termux:API. |
 | **sukey** | Near-root without unlocking the bootloader (no Knox trip). Uses [Shizuku](https://github.com/thedjchi/Shizuku) to give Termux ADB-level shell access, then: stop Android killing Termux (phantom process killer), remove or freeze bloat (reversible), grant app permissions, system-wide ad-blocking DNS, hidden settings editor, APK installs with downgrades, full logcat. Setup pulls `rish` out of the Shizuku app for you; you just pair Shizuku once over Wireless debugging. |
+| **recentkey** | Recent files in **MENU → GO → Recent files**. Tracks opened, viewed, edited, and shared files; updates paths after moves and renames (including folders). Shows up to 20 newest unique files in an fzf picker; Enter reveals the file’s folder. Missing, unreadable, and trashed files are skipped. History lives in `${XDG_DATA_HOME:-~/.local/share}/t-launcher/recent.tsv`, never in `.config`. |
 | **cleankey** | What's safe to delete, and why. Looks through your home folder, `~/bin` and Download and labels everything **KEEP** (Termux or your tools need it), **CHECK** (something uses it, or it's unknown) or **SAFE** (caches, broken links, unfinished or duplicate downloads), showing what uses each item and what it checked. Anything it can't identify is CHECK, never SAFE, and "used by" follows your shell startup files through every script they load. Keys and passwords (`.ssh`, `.gnupg`, `.git-credentials`, `.netrc`…) are **locked**: cleankey won't move them at all. Deleting moves things to a trash with **undo**; nothing is gone until you empty the trash, and it never touches `~/storage`. In t-launcher, **Delete** uses this trash, and Tab on any file → *Safe to delete?* explains it. |
 
 ```
@@ -151,6 +152,7 @@ cardkey                      menu · ls · get · put · flash · boot · wifi �
 clipkey                      pick a clip · clipkey <words> · add · start | stop · clear
 talk                         listen once · talk loop · talk <words> · add · list · edit
 sukey                        menu · setup · start · sh · debloat · restore · freeze · keepalive · adblock on · history
+recentkey                    pick · list · clear (automatic tracking when installed)
 cleankey                     menu · home | bin | dl · why <file> · trash <file> · undo · list · empty
 ```
 
