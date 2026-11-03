@@ -12,6 +12,7 @@ mkdir -p -- "$DATA" || exit 1
 # concurrent split-pane hooks. Never wait indefinitely in the launcher.
 lock() {
   local i
+  [[ -d $LOCK ]] && find "$LOCK" -maxdepth 0 -mmin +1 2>/dev/null | grep -q . && rmdir -- "$LOCK" 2>/dev/null
   for ((i=0;i<40;i++)); do
     if mkdir -- "$LOCK" 2>/dev/null; then
       trap 'rmdir -- "$LOCK" 2>/dev/null || :' EXIT
@@ -50,11 +51,9 @@ add() {
   path=$(absolute "$path") || return 0
   [[ -f $path || -L $path ]] || return 0
   lock || return 0
-  # One atomic append for the event; compaction happens while holding the lock.
-  printf '%s\t%s\t%s\n' "$(date +%s)" "$action" "$path" >> "$HISTORY"
-  # Reverse the append log into newest-first order before deduplication.
   tmp=$(mktemp "$DATA/.recent.XXXXXXXX") || { unlock; return 1; }
-  tac "$HISTORY" > "$tmp" && mv -f "$tmp" "$HISTORY"
+  { printf '%s\t%s\t%s\n' "$(date +%s)" "$action" "$path"; cat -- "$HISTORY" 2>/dev/null || :; } > "$tmp" \
+    && mv -f -- "$tmp" "$HISTORY" || rm -f -- "$tmp"
   compact
   unlock
 }
@@ -68,7 +67,8 @@ moved() {
   lock || return 0
   [[ -f $HISTORY ]] || { unlock; return 0; }
   tmp=$(mktemp "$DATA/.recent.XXXXXXXX") || { unlock; return 1; }
-  awk -F '\t' -v OFS='\t' -v old="$old" -v new="$new" '
+  RK_OLD="$old" RK_NEW="$new" awk -F '\t' -v OFS='\t' '
+    BEGIN {old=ENVIRON["RK_OLD"]; new=ENVIRON["RK_NEW"]}
     NF==3 {if ($3==old) $3=new; else if (index($3,old"/")==1) $3=new substr($3,length(old)+1); print}' "$HISTORY" > "$tmp"
   mv -f -- "$tmp" "$HISTORY"
   compact
@@ -81,7 +81,7 @@ in_trash() {
   local log="${XDG_DATA_HOME:-$HOME/.local/share}/cleankey/trash.log"
   [[ -r $log ]] || return 1
   while IFS=$'\t' read -r id when orig trash kb; do
-    [[ $p == "$orig" || $p == "$orig/"* || $p == "$trash" || $p == "$trash/"* ]] && return 0
+    [[ $p == "$trash" || $p == "$trash/"* ]] && return 0
   done < "$log"
   return 1
 }
@@ -100,6 +100,7 @@ rows() {
 pick() {
   command -v fzf >/dev/null 2>&1 || { echo 'recentkey: install fzf (pkg install fzf)' >&2; return 1; }
   local choice p dir
+  [[ -n $(rows) ]] || { echo "No recent files yet" >&2; return 1; }
   choice=$(rows | fzf --reverse --delimiter=$'\t' --with-nth=2,3 \
     --prompt='recent> ' --header='Enter: reveal file in t-launcher · Esc: back' \
     --no-multi) || return 1
