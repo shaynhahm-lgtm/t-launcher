@@ -4,11 +4,13 @@
 Browse your files, see what anything is, and open it with the right thing, all from one fuzzy-search menu.
 Comes with **topen** (open any file with the right tool), **fmget** (install the top 10 Termux file managers), **pkgkey** (what can my installed packages do?) and **fkey** (what is this file and how do I use it?), plus ten optional [add-ons](#add-ons).
 
-**New in v9.2.2:** `talk` now shows the command it matched and asks before running it. Only commands that just open a basic tool menu skip the question, and your own phrases never do.
+**New in v9.3:** t-launcher [fits how much you know](#experience-levels). The first time you run it, it asks, then shows the basics first and the rest when you want it. Nothing is ever locked. Also: uninstall keeps any file you have changed, and a [dev mode](#dev-mode) for people building t-launcher.
 
-**New in v9.2.1:** a safer uninstall. It removes an add-on listed only in the add-on index when the file says `t-launcher add-on` at the top, and leaves anything it is not sure about. The installer also tells you before it installs `fzf` or `file`.
+**v9.2.2:** `talk` now shows the command it matched and asks before running it. Only commands that just open a basic tool menu skip the question, and your own phrases never do.
 
-**New in v9.2:** every [add-on](#add-ons) now explains itself in the menu: what it does, what it needs and anything to know first. Installing asks first, and nothing starts running in the background unless you say yes.
+**v9.2.1:** a safer uninstall. It removes an add-on listed only in the add-on index when the file says `t-launcher add-on` at the top, and leaves anything it is not sure about. The installer also tells you before it installs `fzf` or `file`.
+
+**v9.2:** every [add-on](#add-ons) now explains itself in the menu: what it does, what it needs and anything to know first. Installing asks first, and nothing starts running in the background unless you say yes.
 
 **New in v9:** [Share to t-launcher](#share-to-t-launcher) (send a file from any app straight into t-launcher), and a safety pass: Delete goes to a trash you can undo, and moves to phone storage are checked byte for byte.
 **v8:** [split screen](#split-screen) (Ctrl+S) and a [regrouped menu](#the-menu).
@@ -98,7 +100,28 @@ Grouped and searchable (type `sort`, `go`, `split`…), with live status on the 
 | **TOOLS** | add-ons, your `~/bin` tools, pkgkey, fkey |
 | **APPS** | XFCE desktop, Fieldkit, other file managers (each shows only if you have it) |
 | **VIEW** | hidden files, sort, preview pane |
-| **SETUP** | open-with rules, share to t-launcher on/off, sync, **update t-launcher**, keys & tips |
+| **SETUP** | open-with rules, share to t-launcher on/off, sync, experience level, **update t-launcher**, keys & tips |
+
+### Experience levels
+
+The first time you run t-launcher it asks how you use Termux. That decides what the menus show **first**, nothing more:
+
+| Level | Menu shows |
+|---|---|
+| **New** | the basics: folders, add-ons, file types, hidden files, share, update |
+| **Comfortable** | adds split screen, your `~/bin` tools, packages, other file managers, sort and preview |
+| **Power** | everything (the menu as it was before 9.3) |
+
+Nothing is ever locked. **More…** at the bottom of the menu shows the rest, every add-on is listed and installable at every level (ones suggested for a higher level are marked `LATER`), and you can change your level any time in **MENU → Experience level**. Already using t-launcher? You start at Power, so your menu doesn't change.
+
+### Dev mode
+
+For people working on t-launcher itself. `t-launcher --dev on` keeps everything regular users get and adds two things:
+
+- add-ons still being built on the `dev` branch show up under **Add-ons**, marked `DEV`. Like the main list, their index is plain data that is never run, and it can only add new names, never change the regular add-ons.
+- **Update t-launcher** leaves any file you have changed alone, and doesn't touch your shell alias.
+
+`t-launcher --dev off` turns it off. Any dev add-ons you installed stay in `~/bin`.
 
 ## Keys
 
@@ -182,7 +205,7 @@ Anything a file needs that isn't installed (python, unzip, 7z, java...) gets ins
 curl -fsSL https://raw.githubusercontent.com/shaynhahm-lgtm/t-launcher/main/install.sh | bash -s -- --uninstall
 ```
 
-That removes the add-ons too. (Anything sukey changed on the phone stays; undo it first with `sukey restore`, `sukey unfreeze`, `sukey adblock off`.)
+That removes the add-ons too. Since 9.3 the installer keeps a list of exactly what it put on your phone, and uninstall removes only those files. A file you have changed since it was installed is yours now, so it's left alone and listed, and so is anything it can't be sure about. (Anything sukey changed on the phone stays; undo it first with `sukey restore`, `sukey unfreeze`, `sukey adblock off`.)
 
 ## License
 

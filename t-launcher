@@ -19,7 +19,7 @@
 
 set -uo pipefail
 
-VERSION=9.2.2
+VERSION=9.3
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 QSELF="$(printf '%q' "$SELF")"
 CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/t-launcher"
@@ -124,8 +124,17 @@ FILE_MANAGERS="yazi mc ranger nnn lf vifm broot clifm fff walk"
 
 # ---------- Settings (remembered between runs) ----------
 SHOW_HIDDEN=0; SORT=name; PREVIEW_ON=1; SPLIT_LAYOUT=auto; SPLIT_SIZE=50; LAST_CMD=""
+# LEVEL: new | comfortable | power. It only decides what the menus show FIRST. Nothing is ever
+#   locked: "More…" shows the whole menu, and every add-on is listed and installable at every level.
+#   Empty = never asked. Someone who already had settings before levels existed gets "power",
+#   which is the menu exactly as it was.
+# DEV: 1 = dev mode (t-launcher --dev on). Adds the add-ons from the dev branch's index on top of
+#   the regular ones, and "Update" stops replacing files you have changed.
+LEVEL=""; DEV=0; DEV_BRANCH="${T_DEV_BRANCH:-dev}"
+[[ $DEV_BRANCH =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,63}$ ]] && [[ $DEV_BRANCH != *..* ]] || DEV_BRANCH=dev
 load_settings() {
   [ -f "$CONF" ] || return 0
+  LEVEL=power
   local k v
   while IFS='=' read -r k v; do
     case "$k" in
@@ -134,16 +143,52 @@ load_settings() {
       SPLIT_LAYOUT) case "$v" in auto|stacked|side) SPLIT_LAYOUT="$v" ;; esac ;;
       SPLIT_SIZE)   case "$v" in 50|60|70) SPLIT_SIZE="$v" ;; esac ;;
       LAST_CMD)     LAST_CMD="$v" ;;
+      LEVEL)        case "$v" in new|comfortable|power) LEVEL="$v" ;; "") LEVEL="" ;; esac ;;   # saved empty = not asked yet
+      DEV)          [[ $v =~ ^[01]$ ]] && DEV="$v" ;;
     esac
   done < "$CONF"
 }
 save_settings() {
   mkdir -p "$CONF_DIR" 2>/dev/null || return 0
   printf '%s\n' "SHOW_HIDDEN=$SHOW_HIDDEN" "SORT=$SORT" "PREVIEW_ON=$PREVIEW_ON" \
-    "SPLIT_LAYOUT=$SPLIT_LAYOUT" "SPLIT_SIZE=$SPLIT_SIZE" "LAST_CMD=$LAST_CMD" > "$CONF.tmp.$$" \
+    "SPLIT_LAYOUT=$SPLIT_LAYOUT" "SPLIT_SIZE=$SPLIT_SIZE" "LEVEL=$LEVEL" "DEV=$DEV" "LAST_CMD=$LAST_CMD" > "$CONF.tmp.$$" \
     && mv -f "$CONF.tmp.$$" "$CONF"
 }
 load_settings
+lvl_rank() { case "$1" in new) echo 1 ;; comfortable) echo 2 ;; *) echo 3 ;; esac; }
+at_level() { [ "$(lvl_rank "${LEVEL:-power}")" -ge "$(lvl_rank "$1")" ]; }   # at_level comfortable -> 0 if the user is there or past it
+
+# ---------- Dev mode: extra add-ons from the dev branch ----------
+# Same rules as the main index: it is DATA, parsed by idx_parse, never run. It can only ADD names
+# the main list doesn't have. A dev add-on is downloaded from addons/<name> on the dev branch.
+IDX_DEV_FILE="${IDX_FILE%/*}/INDEX.dev"
+MANIFEST="${IDX_FILE%/*}/manifest"
+DEV_ADDONS=""
+dev_load() {
+  local n k v
+  DEV_ADDONS=""
+  [ "$DEV" = 1 ] && [ -f "$IDX_DEV_FILE" ] && [ -r "$IDX_DEV_FILE" ] || return 0
+  while IFS=$'\t' read -r n k v; do
+    case " $ADDONS " in *" $n "*) continue ;; esac
+    IDX["$n.$k"]="$v"
+    case " $DEV_ADDONS " in *" $n "*) ;; *) DEV_ADDONS+=" $n" ;; esac
+  done < <(idx_parse "$IDX_DEV_FILE")
+  DEV_ADDONS="${DEV_ADDONS# }"
+}
+is_dev_addon() { case " $DEV_ADDONS " in *" $1 "*) return 0 ;; esac; return 1; }
+dev_refresh() { # fetch the dev branch's index. 0 = got it
+  need curl || { msg "Needs curl: pkg install curl"; return 1; }
+  mkdir -p "${IDX_DEV_FILE%/*}" || return 1
+  if curl -fsSL --max-filesize 65536 "https://raw.githubusercontent.com/shaynhahm-lgtm/t-launcher/$DEV_BRANCH/addons/INDEX" -o "$IDX_DEV_FILE.part" \
+     && mv -f "$IDX_DEV_FILE.part" "$IDX_DEV_FILE"; then dev_load; return 0; fi
+  rm -f "$IDX_DEV_FILE.part"; return 1
+}
+case "${1:-}" in --list|--header|--preview|--viewer-idle|--view) ;; *) dev_load ;; esac
+manifest_record() { # same format install.sh writes: "sha256<TAB>path"
+  local s; s="$(sha256sum -- "$1" 2>/dev/null | cut -c1-64)"; [ -n "$s" ] || return 0
+  { [ -f "$MANIFEST" ] && awk -F'\t' -v p="$1" '$2 != p' "$MANIFEST"; printf '%s\t%s\n' "$s" "$1"; } >"$MANIFEST.tmp.$$" 2>/dev/null \
+    && mv -f "$MANIFEST.tmp.$$" "$MANIFEST"
+}
 
 # ---------- Navigation stack ----------
 declare -a NAV_STACK=("$PWD")
@@ -1254,11 +1299,16 @@ recent_pick() { # MENU → Recent files. "Reveal" hands back DIR<TAB>FILE; go th
   msg "That folder isn't there any more."; return 1
 }
 get_addon() { # downloads an add-on into ~/bin (they expect to live there)
-  local a="$1" tmp
+  local a="$1" tmp src="$ADDON_RAW"
+  is_dev_addon "$a" && src="https://raw.githubusercontent.com/shaynhahm-lgtm/t-launcher/$DEV_BRANCH/addons"
   mkdir -p "$HOME/bin"; tmp="$HOME/bin/.$a.part"
+  if [ -e "$HOME/bin/$a" ] || [ -L "$HOME/bin/$a" ]; then   # never write over something that's already there
+    echo "There is already a ~/bin/$a, so nothing was downloaded."; return 1
+  fi
   echo "Installing $a..."
-  curl -fsSL "$ADDON_RAW/$a" -o "$tmp" && mv -f "$tmp" "$HOME/bin/$a" && chmod +x "$HOME/bin/$a" \
+  curl -fsSL "$src/$a" -o "$tmp" && mv -f "$tmp" "$HOME/bin/$a" && chmod +x "$HOME/bin/$a" \
     || { rm -f "$tmp"; return 1; }
+  manifest_record "$HOME/bin/$a"
   case ":$PATH:" in *":$HOME/bin:"*) ;; *) export PATH="$HOME/bin:$PATH" ;; esac
   hash -r   # download only. Nothing is started here: see addon_offer_start
 }
@@ -1269,6 +1319,7 @@ addon_about() {
     echo "Download every add-on that isn't installed yet. You see the list first, and nothing starts running in the background unless you say yes."
     return
   fi
+  is_dev_addon "$a" && echo "DEV: from the '$DEV_BRANCH' branch. Still being worked on by the roundtable."
   x="${IDX[$a.long]:-}"; [ -n "$x" ] || x="$(addon_desc "$a")"
   [ -n "$x" ] || x="No description yet. It's in ~/bin and calls itself a t-launcher add-on, but it isn't in the add-on index."
   echo "$x"
@@ -1281,6 +1332,8 @@ addon_about() {
   { [ "${IDX[$a.background]:-}" = yes ] || [ -n "$(addon_bg_reason "$a")" ]; } \
     && echo "Can keep running in the background. You're asked before it starts."
   x="${IDX[$a.warning]:-}";  [ -n "$x" ] && echo "Heads up: $x"
+  x="${IDX[$a.level]:-}"
+  [ -n "$x" ] && ! at_level "$x" && echo "Suggested once you're at the \"$x\" level. You can install it now anyway."
   return 0
 }
 # The add-ons that can leave something running, and what that something does. The command that
@@ -1336,13 +1389,24 @@ addons_menu() {
   while true; do
     set_widths
     choice="$( {
+      # suggested for your level first, then the rest (still listed, still installable)
       for a in $ADDONS; do
+        at_level "${IDX[$a.level]:-new}" || continue
         if need "$a"; then row "$a" "$G_TOOLS" ON "$a" "$(addon_desc "$a")"
         else row "$a" "$C_DIM" GET "$a" "$(addon_desc "$a")"; fi
       done
-      while IFS= read -r a; do [ -n "$a" ] && row "$a" "$G_TOOLS" ON "$a" "not in the index"; done < <(extra_addons)
+      for a in $ADDONS; do
+        at_level "${IDX[$a.level]:-new}" && continue
+        if need "$a"; then row "$a" "$G_TOOLS" ON "$a" "$(addon_desc "$a")"
+        else row "$a" "$C_DIM" LATER "$a" "$(addon_desc "$a")"; fi
+      done
+      for a in $DEV_ADDONS; do
+        if need "$a"; then row "$a" "$G_APPS" DEV "$a" "$(addon_desc "$a")"
+        else row "$a" "$C_DIM" DEV "$a" "$(addon_desc "$a") · not installed"; fi
+      done
+      while IFS= read -r a; do [ -n "$a" ] && ! is_dev_addon "$a" && row "$a" "$G_TOOLS" ON "$a" "not in the index"; done < <(extra_addons)
       row all "$G_SETUP" GET "Install all add-ons" "$(addons_count) of $NADD now"
-    } | MP="bash $QSELF --describe addon-{1}" MPH=10 menu_pick "Add-ons" "GET = not installed yet · Esc = back" "$last")" || return
+    } | MP="bash $QSELF --describe addon-{1}" MPH=10 menu_pick "Add-ons" "GET = not installed yet$(at_level power || echo " · LATER = for a higher level, yours if you want it") · Esc = back" "$last")" || return
     last="$choice"
     if [ "$choice" = all ]; then
       todo=""; for a in $ADDONS; do need "$a" || todo+=" $a"; done
@@ -1396,6 +1460,9 @@ describe() {
     sync)     d="Back up your toolkit to GitHub (toolkit-sync)." ;;
     update)   d="Download the newest t-launcher and restart into it. Your settings stay." ;;
     keys)     d="Every key and gesture on one page." ;;
+    level)    d="How much the menus show first. New = the basics · Comfortable = adds split screen, your own tools, packages · Power = everything. Nothing is ever locked." ;;
+    more)     d="Show the whole menu this once. To always see it, raise your Experience level." ;;
+    dev)      d="Dev mode is on (branch: $DEV_BRANCH). You get the regular add-ons plus the ones still being built, and Update leaves files you changed alone." ;;
     split-sw)     d="Jump to the other pane. Tapping it works too, or Ctrl+W from the file list." ;;
     split-zoom)   d="Make this pane fill the screen. Pick it again to bring the split back." ;;
     split-swap)   d="Trade places with the other pane." ;;
@@ -1442,14 +1509,17 @@ keys_help() {
 }
 
 main_menu() {
-  local choice last="" pr sst nbin nfm fm x
+  local choice last="" pr sst nbin nfm fm x full=0
   while true; do
     set_widths
     pr="$(partner_role)"; sst="off"; [ -n "$pr" ] && sst="on: $(role_name "$pr")"
     nbin="$(bin_tools | wc -l)"
     nfm=0; for fm in $FILE_MANAGERS; do need "$fm" && nfm=$((nfm+1)); done
     choice="$( {
-      row split    "$G_SPLIT" SPLIT "Split screen…"      "$sst"
+      # show LEVEL row ... : the row appears at that level and up, or after "More…" was picked
+      local hid=0
+      show() { local l="$1"; shift; if [ "$full" = 1 ] || at_level "$l"; then "$@"; else hid=$((hid + 1)); fi; }
+      show comfortable row split "$G_SPLIT" SPLIT "Split screen…" "$sst"
       row home     "$G_GO"    GO    "Home"               "~"
       row dl       "$G_GO"    GO    "Downloads"          "${DL##*/}"
       row goto     "$G_GO"    GO    "Go to folder…"
@@ -1457,20 +1527,23 @@ main_menu() {
       { [ "$(share_status)" = on ] || [ -d "$INBOX" ]; } && row inbox "$G_GO" GO "Inbox (shared files)" "$(inbox_count) waiting"
       rk_ok && row recent "$G_GO" GO "Recent files" "recentkey"
       row addons   "$G_TOOLS" TOOLS "Add-ons"            "$(addons_count) of $NADD installed"
-      [ -d "$HOME/bin" ] && row bin "$G_TOOLS" TOOLS "My tools (~/bin)" "$nbin tools"
-      need pkgkey  && row pkgkey "$G_TOOLS" TOOLS "Packages"   "pkgkey"
+      [ -d "$HOME/bin" ] && show comfortable row bin "$G_TOOLS" TOOLS "My tools (~/bin)" "$nbin tools"
+      need pkgkey  && show comfortable row pkgkey "$G_TOOLS" TOOLS "Packages"   "pkgkey"
       need fkey    && row fkey   "$G_TOOLS" TOOLS "File types" "fkey"
-      has_desk     && row desk   "$G_APPS"  APPS  "Desktop (XFCE)"
-      [ -d "$FIELDKIT_DIR" ] && row fieldkit "$G_APPS" APPS "Fieldkit" "localhost:8080"
-      row fm       "$G_APPS"  APPS  "Other file managers" "$nfm installed"
+      has_desk     && show power row desk   "$G_APPS"  APPS  "Desktop (XFCE)"
+      [ -d "$FIELDKIT_DIR" ] && show power row fieldkit "$G_APPS" APPS "Fieldkit" "localhost:8080"
+      show comfortable row fm "$G_APPS" APPS "Other file managers" "$nfm installed"
       row hidden   "$G_VIEW"  VIEW  "Hidden files"       "$([ "$SHOW_HIDDEN" = 1 ] && echo shown || echo hidden)"
-      row sort     "$G_VIEW"  VIEW  "Sort"               "$(case $SORT in newest) echo "newest first";; biggest) echo "biggest first";; *) echo "by name";; esac)"
-      row preview  "$G_VIEW"  VIEW  "Preview pane"       "$([ "$PREVIEW_ON" = 1 ] && echo on || echo off)"
-      need topen   && row topen "$G_SETUP" SETUP "Open-with rules" "topen"
-      need toolkit-sync && row sync "$G_SETUP" SETUP "Sync toolkit to GitHub"
+      show comfortable row sort "$G_VIEW" VIEW "Sort" "$(case $SORT in newest) echo "newest first";; biggest) echo "biggest first";; *) echo "by name";; esac)"
+      show comfortable row preview "$G_VIEW" VIEW "Preview pane" "$([ "$PREVIEW_ON" = 1 ] && echo on || echo off)"
+      need topen   && show power row topen "$G_SETUP" SETUP "Open-with rules" "topen"
+      need toolkit-sync && show power row sync "$G_SETUP" SETUP "Sync toolkit to GitHub"
       row share    "$G_SETUP" SETUP "Share to t-launcher" "$(share_status)"
+      row level    "$G_SETUP" SETUP "Experience level"   "${LEVEL:-power}"
+      [ "$DEV" = 1 ] && row dev "$G_APPS" DEV "Dev mode" "on · $DEV_BRANCH"
       row update   "$G_SETUP" SETUP "Update t-launcher"  "v$VERSION"
       row keys     "$G_SETUP" SETUP "Keys & tips"
+      [ "$hid" -eq 0 ] || row more "$C_DIM" MORE "More…" "$hid more at a higher level"   # (|| not &&: a false last line would fail the pipe)
     } | MP="bash $QSELF --describe {1}" menu_pick "Menu" "type to search · Esc = back" "$last")" || return
     last="$choice"
     case "$choice" in
@@ -1508,14 +1581,54 @@ main_menu() {
       sync)     toolkit-sync; msg "\nSync finished." ;;
       update)   update_self ;;
       keys)     keys_help ;;
+      more)     full=1; last="" ;;
+      level)    level_menu ;;
+      dev)      dev_menu ;;
     esac
   done
+}
+
+# ---------- Experience level ----------
+level_menu() { # level_menu [first]  -> sets LEVEL. Esc keeps what you had (first time: new)
+  local c hint="changes what the menus show first · nothing is ever locked · Esc = back"
+  [ "${1:-}" = first ] && hint="Welcome! How do you use Termux? Not sure = pick the first. Change it any time in MENU."
+  set_widths
+  c="$( {
+    row new         "$G_GO"    NEW   "I'm new to this"       "the basics"
+    row comfortable "$G_TOOLS" COMFY "I know my way around"  "+ split, tools"
+    row power       "$G_SETUP" POWER "Show me everything"    "the full menu"
+  } | menu_pick "Experience level" "$hint" "${LEVEL:-new}")" || { [ -n "$LEVEL" ] || LEVEL=new; save_settings; return; }
+  case "$c" in new|comfortable|power) LEVEL="$c"; save_settings ;; esac
+}
+
+# ---------- Dev mode ----------
+dev_set() { # dev_set on|off|status   (t-launcher --dev ...)
+  case "${1:-status}" in
+    on)  DEV=1; [ -n "$LEVEL" ] || LEVEL=power; save_settings
+         echo "Dev mode is on (branch: $DEV_BRANCH)."
+         echo "You still get everything regular users get. On top of that:"
+         echo "  - add-ons listed in the $DEV_BRANCH branch's index show up under Add-ons, marked DEV"
+         echo "  - Update t-launcher leaves any file you have changed alone"
+         if dev_refresh 2>/dev/null; then echo "Dev add-ons right now: ${DEV_ADDONS:-none yet}"
+         else echo "Couldn't read the $DEV_BRANCH branch's add-on list (no such branch yet, or no connection). Try again from MENU > Dev mode."; fi ;;
+    off) DEV=0; save_settings; echo "Dev mode is off. Dev add-ons you already installed stay in ~/bin." ;;
+    *)   [ "$DEV" = 1 ] && echo on || echo off ;;
+  esac
+}
+dev_menu() {
+  case "$(pick "Dev mode · $DEV_BRANCH" "Check for new dev add-ons" "Turn dev mode off")" in
+    "Check for new dev add-ons")
+      if dev_refresh; then msg "Dev add-ons: ${DEV_ADDONS:-none yet}. They're in MENU > Add-ons, marked DEV."
+      else msg "Couldn't read the $DEV_BRANCH branch's add-on list (no such branch yet, or no connection)."; fi ;;
+    "Turn dev mode off") DEV=0; DEV_ADDONS=""; save_settings; msg "Dev mode is off." ;;
+  esac
 }
 
 update_self() {
   need curl || { msg "Needs curl: pkg install curl"; return; }
   echo -e "${C_ACC}Updating t-launcher...${C_RESET}"
-  if curl -fsSL "$RAW_BASE/install.sh" | bash; then
+  [ "$DEV" = 1 ] && echo "Dev mode: files you have changed are left alone."
+  if curl -fsSL "$RAW_BASE/install.sh" | T_KEEP_MODIFIED="$DEV" bash; then
     save_settings
     echo "Restarting..."; sleep 1
     exec bash "$SELF" "$(current_dir)"
@@ -1562,6 +1675,7 @@ main() {
   local out key sel base target hdr up rc listing count keys
   if in_tmux; then setp @tl_role files; trap cleanup EXIT; fi
   [ "${TL_OWNED:-}" = 1 ] && in_tmux && style_session
+  [ -z "$LEVEL" ] && [ "${TL_SECOND:-}" != 1 ] && level_menu first   # asked once, the first time t-launcher ever runs
   if [ -n "${PENDING_SPLIT:-}" ]; then split_open "$PENDING_SPLIT" "${PENDING_ARG:-}"; PENDING_SPLIT=""; fi
 
   while true; do
@@ -1635,6 +1749,7 @@ case "${1:-}" in
   --monitor)     monitor_pane; helper_exit; exit 0 ;;
   --run-pane)    run_pane "${2:-cmd}" "${3:-}"; exit 0 ;;
   --received)    received_screen "${2:-}"; exit $? ;;
+  --dev)         dev_set "${2:-status}"; exit $? ;;
   --share)       case "${2:-status}" in on) share_on ;; auto) share_on auto ;; off) share_off ;; *) share_status ;; esac; exit $? ;;
   --pane)        [ -d "${2:-}" ] && NAV_STACK=("$(readlink -f "$2")"); TL_SECOND=1; main ;;
   --split)       PENDING_SPLIT="${2:-}"; PENDING_ARG="${3:-}"
