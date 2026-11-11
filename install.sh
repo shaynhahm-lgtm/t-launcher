@@ -7,6 +7,16 @@
 RAW="https://raw.githubusercontent.com/shaynhahm-lgtm/t-launcher/${T_BRANCH:-main}"
 TOOLS="t-launcher pkgkey fkey topen fmget"
 ADDONS="dropwatch cardkey netkey offset tdoctor clipkey talk sukey cleankey recentkey"   # these live in ~/bin
+# addons/INDEX describes the add-ons. It is data: we only ever pull plain names out of it.
+DATA="${XDG_DATA_HOME:-$HOME/.local/share}/t-launcher"
+index_names() { # adds any add-on the index lists that the built-in list above doesn't
+  local n
+  [ -f "$DATA/INDEX" ] || return 0
+  for n in $(head -c 65536 "$DATA/INDEX" | sed -n 's/^name:[[:space:]]*\([a-z0-9][a-z0-9-]*\)[[:space:]]*$/\1/p'); do
+    case " $ADDONS " in *" $n "*) ;; *) ADDONS="$ADDONS $n" ;; esac
+  done
+}
+index_names
 if [ "${1:-}" = "--uninstall" ]; then
   [ -f "$PREFIX/bin/t-launcher" ] && bash "$PREFIX/bin/t-launcher" --share off >/dev/null 2>&1   # only removes our own share hook
   for t in $TOOLS; do rm -f "$PREFIX/bin/$t"; done
@@ -14,15 +24,23 @@ if [ "${1:-}" = "--uninstall" ]; then
   [ -x "$HOME/bin/clipkey" ] && "$HOME/bin/clipkey" uninstall >/dev/null 2>&1
   [ -x "$HOME/bin/sukey" ] && "$HOME/bin/sukey" uninstall >/dev/null 2>&1
   for a in $ADDONS; do rm -f "$HOME/bin/$a"; done
+  rm -f "$DATA/INDEX"
   echo "Removed: $TOOLS $ADDONS"
   [ -d "$HOME/.local/share/cleankey/trash" ] && echo "cleankey's trash was kept (your files): ~/.local/share/cleankey/trash and /sdcard/.cleankey-trash"
   exit 0
 fi
+SRC="$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")"
+# The add-on index first, so the list below is current. No index is fine: built-in list is used.
+mkdir -p "$DATA"
+if [ -f "$SRC/install.sh" ] && [ -f "$SRC/addons/INDEX" ]; then cp "$SRC/addons/INDEX" "$DATA/INDEX"
+elif curl -fsSL "$RAW/addons/INDEX" -o "$DATA/INDEX.part"; then mv -f "$DATA/INDEX.part" "$DATA/INDEX"
+else rm -f "$DATA/INDEX.part"; echo "Couldn't get the add-on index (add-ons still work, with shorter descriptions)."
+fi
+index_names
 WANT=""
 if [ "${1:-}" = "--addons" ]; then shift; WANT="${*:-$ADDONS}"; fi
 command -v fzf >/dev/null || pkg install -y fzf
 command -v file >/dev/null || pkg install -y libmagic >/dev/null 2>&1 || pkg install -y file >/dev/null 2>&1 || true
-SRC="$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")"
 for t in $TOOLS; do
   if [ -f "$SRC/install.sh" ] && [ -f "$SRC/$t" ]; then cp "$SRC/$t" "$PREFIX/bin/$t"
   else curl -fsSL "$RAW/$t" -o "$PREFIX/bin/$t" || { echo "Download failed: $t"; exit 1; }
@@ -49,8 +67,6 @@ if [ -n "$GOT" ]; then
        done
        export PATH="$HOME/bin:$PATH" ;;
   esac
-  case " $GOT " in *" dropwatch "*) "$HOME/bin/dropwatch" install ;; esac
-  case " $GOT " in *" clipkey "*) "$HOME/bin/clipkey" setup ;; esac
 fi
 # Older setups run t-launcher through a shell alias to a copy like ~/bin/termux-launcher.sh.
 #  - copy still there: update it too (backed up first) so the alias doesn't run an old version
@@ -81,5 +97,8 @@ echo -e "\033[1;32mInstalled!\033[0m  Type: t-launcher   (Ctrl+S = split screen 
 [ -n "$GOT" ] && echo -e "Add-ons:$GOT   (more in t-launcher → MENU → Add-ons)"
 [ "$(bash "$PREFIX/bin/t-launcher" --share status 2>/dev/null)" = on ] && echo "Share to t-launcher is on: in any app, Share → Termux → Edit"
 case " $GOT " in *" sukey "*) echo "sukey needs a one-time Shizuku pairing: run  sukey setup" ;; esac
+# Installing never starts a background job. These two can run one, when you choose to:
+case " $GOT " in *" dropwatch "*) echo "dropwatch isn't watching yet. To start it:  dropwatch install" ;; esac
+case " $GOT " in *" clipkey "*) echo "clipkey isn't saving clips yet. To start it:  clipkey setup" ;; esac
 [ -n "$FIXED_ALIAS" ] && echo "This Termux window still remembers the old alias: open a new session, or run  unalias t-launcher"
 exit 0

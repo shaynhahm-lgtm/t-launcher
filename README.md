@@ -24,7 +24,9 @@ curl -fsSL https://raw.githubusercontent.com/shaynhahm-lgtm/t-launcher/main/inst
 curl -fsSL https://raw.githubusercontent.com/shaynhahm-lgtm/t-launcher/main/install.sh | bash -s -- --addons tdoctor offset
 ```
 
-Or skip all that: open **MENU → Add-ons** in t-launcher, and anything not installed yet installs itself when you pick it.
+Or skip all that: open **MENU → Add-ons** in t-launcher. Pick one to see what it does, what it needs and anything to know first, then say yes to install it.
+
+Installing never starts anything in the background. dropwatch and clipkey can each keep a watcher running; you're asked about that separately, or start one later with `dropwatch install` / `clipkey setup`.
 
 ## What it does
 
@@ -129,6 +131,8 @@ fmget -l             what's installed
 ## Add-ons
 
 Ten extra tools, each one a single script in [`addons/`](addons). They install to `~/bin`, run on their own or from **MENU → Add-ons**, and install anything they need (nmap, curl, fzf...) the first time you use them.
+
+Every add-on has a block in [`addons/INDEX`](addons/INDEX): a short and long description, a suggested experience level, what it needs (packages, permissions, companion apps, hardware) and any warning. t-launcher, the installer and cleankey all take their add-on list from that one file. It is plain data and is never run. Writing your own add-on? Put `t-launcher add-on` in the first few lines of the script and it shows up in **MENU → Add-ons** even without an index entry.
 
 | Add-on | What it does |
 |---|---|

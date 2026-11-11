@@ -1,0 +1,113 @@
+# t-launcher add-on index: what each add-on is, what it needs, what to know first.
+# install.sh copies it to ~/.local/share/t-launcher/INDEX. t-launcher, install.sh and
+# cleankey all read their add-on list from it.
+#
+# This file is DATA. The launcher reads it line by line and never
+# sources, evals or runs anything in it. Unknown fields are ignored,
+# a malformed block is skipped, and a missing file falls back to a
+# built-in name list. Installed add-ons with no block here still show
+# in the menu ("no description yet") and still run.
+#
+# One block per add-on, blank line between blocks.
+#
+# Required
+#   name        command name (letters, digits, dash; matches addons/<name>)
+#   short       menu blurb, 40 characters or less
+#   long        the description strip, about 3 lines on a phone
+#   level       new | comfortable | power
+#               SUGGESTED starting level only. Never restricts access:
+#               every add-on is searchable and installable at every level.
+# Optional
+#   example     one thing to try first
+#   pkgs        Termux packages it uses (shown before install)
+#   perms       Android permissions it will ask for
+#   apps        companion Android apps that must be installed
+#   hardware    physical gear it is for
+#   background  yes = this add-on CAN run something that keeps running.
+#               It is a label, not permission. Installing never starts
+#               it; the user is asked separately, with a plain reason.
+#   warning     shown before install and before first run, for add-ons
+#               whose actions have significant consequences
+
+name: tdoctor
+short: check & fix Termux
+long: Checks your Termux setup and offers to fix what it finds. Good first stop when something breaks.
+example: tdoctor --quick
+level: new
+
+name: cleankey
+short: safe cleanup + undo
+long: Shows what's safe to delete in home, ~/bin and Download, and why. Deletes go to a trash you can undo.
+example: cleankey why ~/somefile
+level: new
+pkgs: fzf
+perms: storage
+
+name: recentkey
+short: recent files
+long: Quickly return to files you've used without searching through folders. Keeps your last 20.
+example: MENU > Recent files
+level: new
+pkgs: fzf
+
+name: clipkey
+short: clipboard history
+long: Remembers what you copy so you can get an old clip back. "clipkey clear" wipes the history.
+example: clipkey
+level: new
+pkgs: fzf, termux-api
+apps: Termux:API
+background: yes
+
+name: offset
+short: pipe offset & grade
+long: Pipe offset and grade math in feet and tenths: run, diagonal, rolling offsets, fall over a distance.
+example: offset 2.4 45
+level: new
+
+name: dropwatch
+short: auto-handles downloads
+long: Watches Download and handles new files for you: scripts become commands (never run), APKs get scanned. Every change has Undo.
+example: dropwatch rules
+level: comfortable
+pkgs: termux-api
+perms: storage
+apps: Termux:API (for the Undo button)
+background: yes
+warning: Moves and installs files from Download on its own once the watcher is running.
+
+name: netkey
+short: what's on your Wi-Fi
+long: Shows every device on your Wi-Fi and helps you work out what each one is. Speed test too.
+example: netkey
+level: comfortable
+pkgs: nmap, curl, fzf, termux-api
+apps: Termux:API
+warning: Only scan networks you own or have permission to scan.
+
+name: talk
+short: voice commands
+long: Say what you want and it runs the matching command. Teach it your own phrases with "talk add".
+example: talk list
+level: comfortable
+pkgs: termux-api
+perms: microphone
+apps: Termux:API
+warning: Runs the matched command right away, with no confirmation. A misheard phrase can run the wrong one.
+
+name: cardkey
+short: Cardputer over Wi-Fi
+long: Runs an M5Stack Cardputer from your phone: browse its SD card, send files, flash firmware, make backups.
+example: cardkey
+level: comfortable
+pkgs: curl, fzf
+hardware: M5Stack Cardputer running Launcher
+warning: Flashing firmware replaces what is on the Cardputer.
+
+name: sukey
+short: near-root (Shizuku)
+long: ADB-level powers via Shizuku, no root. Some actions change how the whole phone behaves, not just Termux.
+example: sukey help
+level: power
+apps: Shizuku (set up and running)
+warning: Can remove or freeze apps, grant permissions and change phone-wide Android settings. Read each prompt before you say yes.

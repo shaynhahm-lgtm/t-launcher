@@ -74,7 +74,50 @@ MENU_LABEL="Menu: split, add-ons, tools, settings"
 FIELDKIT_DIR="$HOME/fieldkit"
 DL="/storage/emulated/0/Download"
 [ -d "$DL" ] || DL="$HOME/storage/downloads"
-ADDONS="dropwatch cardkey netkey offset tdoctor clipkey talk sukey cleankey recentkey"
+ADDONS_BUILTIN="dropwatch cardkey netkey offset tdoctor clipkey talk sukey cleankey recentkey"
+ADDONS="$ADDONS_BUILTIN"
+
+# ---------- Add-on index (addons/INDEX): descriptions, needs, warnings ----------
+# The index is DATA. It is read line by line with awk and never sourced, eval'd or run.
+# Only known fields are kept, values lose control characters and backslashes, and a block
+# with a bad name, a bad level or no description is skipped. No usable file? The built-in
+# list above still works, so a missing or broken index can't take the add-ons away.
+IDX_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/t-launcher/INDEX"
+declare -A IDX=()
+idx_parse() { # idx_parse FILE -> "name<TAB>field<TAB>value" lines, valid blocks only
+  head -c 65536 -- "$1" 2>/dev/null | awk '
+    function flush(   k) {
+      if (name ~ /^[a-z0-9][a-z0-9-]*$/ && length(name) <= 32 && !(name in seen) \
+          && f["short"] != "" && f["long"] != "" \
+          && (f["level"] == "new" || f["level"] == "comfortable" || f["level"] == "power")) {
+        seen[name] = 1
+        for (k in f) if (f[k] != "") printf "%s\t%s\t%s\n", name, k, f[k]
+      }
+      name = ""; split("", f)
+    }
+    /^[[:space:]]*#/ { next }
+    /^[[:space:]]*$/ { flush(); next }
+    {
+      i = index($0, ":"); if (i < 2) next
+      k = substr($0, 1, i - 1); v = substr($0, i + 1)
+      gsub(/[[:cntrl:]]/, "", v); gsub(/\\/, "", v); gsub(/^ +| +$/, "", v)
+      if (k == "name") { if (name != "") flush(); name = v; next }
+      if (k !~ /^(short|long|level|example|pkgs|perms|apps|hardware|background|warning)$/) next
+      f[k] = substr(v, 1, (k == "short") ? 40 : 300)
+    }
+    END { flush() }' 2>/dev/null
+}
+idx_load() { # fills IDX[name.field]; ADDONS = index order, then any built-in the index left out
+  local n k v names=""
+  [ -f "$IDX_FILE" ] && [ -r "$IDX_FILE" ] || return 0
+  while IFS=$'\t' read -r n k v; do
+    IDX["$n.$k"]="$v"
+    case " $names " in *" $n "*) ;; *) names+=" $n" ;; esac
+  done < <(idx_parse "$IDX_FILE")
+  for n in $ADDONS_BUILTIN; do case " $names " in *" $n "*) ;; *) names+=" $n" ;; esac; done
+  ADDONS="${names# }"
+}
+case "${1:-}" in --list|--header|--preview|--viewer-idle|--view) ;; *) idx_load ;; esac   # not on fzf's per-keypress helpers
 NADD=$(set -- $ADDONS; echo $#)
 ADDON_RAW="$RAW_BASE/addons"
 FILE_MANAGERS="yazi mc ranger nnn lf vifm broot clifm fff walk"
@@ -158,7 +201,7 @@ pick() { # pick "Title" option... -> prints the chosen line
 }
 
 # Menu rows are "KEY<TAB>display". menu_pick shows the display and prints the KEY.
-#   MP="preview command" menu_pick ...   adds a description strip at the bottom
+#   MP="preview command" menu_pick ...   adds a description strip at the bottom (MPH = its height, default 4)
 LW=24
 set_widths() { local c; c="$(cols)"; LW=$(( c - 27 )); ((LW > 26)) && LW=26; ((LW < 12)) && LW=12; }
 row() { # row KEY COLOR GROUP LABEL [STATUS]
@@ -176,7 +219,7 @@ menu_pick() { # menu_pick TITLE HINT [KEY-to-start-on] < rows  -> prints KEY
     pos="$(printf '%s\n' "$rows" | grep -n -m1 "^$start"$'\t' | cut -d: -f1)"
     [ -n "$pos" ] && o+=(--bind "load:pos($pos)")
   fi
-  [ -n "${MP:-}" ] && o+=(--preview "$MP" --preview-window=down,4,border-top)
+  [ -n "${MP:-}" ] && o+=(--preview "$MP" --preview-window="down,${MPH:-4},border-top")
   # in a short split pane, go full screen while picking, then put the split back
   local zoomed=0 r rc
   if in_tmux && [ "$(popt "$MYPANE" window_zoomed_flag)" = 0 ] && split_active; then
@@ -529,9 +572,13 @@ tool_pick() { # add-ons + ~/bin tools -> prints a command name (installs add-ons
       row "$t" "$G_SETUP" BIN "$t" "~/bin"
     done < <(bin_tools)
     need pkgkey && row pkgkey "$G_INFO" PKG pkgkey "packages"
-  } | menu_pick "Run in the other pane" "GET = installs on pick")" || return 1
+  } | menu_pick "Run in the other pane" "GET = not installed yet")" || return 1
   case " $ADDONS " in
-    *" $choice "*) need "$choice" || get_addon "$choice" || { msg "Install of $choice failed."; return 1; } ;;
+    *" $choice "*)
+      if ! need "$choice"; then   # this runs inside $(...), so everything the user sees goes to stderr
+        addon_install "$choice"
+        case $? in 0) ;; 2) return 1 ;; *) msg "Install of $choice failed." >&2; return 1 ;; esac
+      fi ;;
   esac
   printf '%s' "$choice"
 }
@@ -1172,7 +1219,8 @@ options_menu() {
 }
 
 # ---------- Add-ons: extra tools, installed on first pick ----------
-addon_desc() {
+addon_desc() { # short menu blurb: from the index, else the built-in one
+  [ -n "${IDX[$1.short]:-}" ] && { echo "${IDX[$1.short]}"; return; }
   case "$1" in
     dropwatch) echo "auto-handles downloads" ;;
     cardkey)   echo "Cardputer over Wi-Fi" ;;
@@ -1212,13 +1260,79 @@ get_addon() { # downloads an add-on into ~/bin (they expect to live there)
   curl -fsSL "$ADDON_RAW/$a" -o "$tmp" && mv -f "$tmp" "$HOME/bin/$a" && chmod +x "$HOME/bin/$a" \
     || { rm -f "$tmp"; return 1; }
   case ":$PATH:" in *":$HOME/bin:"*) ;; *) export PATH="$HOME/bin:$PATH" ;; esac
-  [ "$a" = dropwatch ] && "$HOME/bin/dropwatch" install
-  [ "$a" = clipkey ] && "$HOME/bin/clipkey" setup
-  hash -r
+  hash -r   # download only. Nothing is started here: see addon_offer_start
+}
+# What the index says about one add-on, as plain text (the description strip and the install screen)
+addon_about() {
+  local a="$1" x needs=""
+  if [ "$a" = all ]; then
+    echo "Download every add-on that isn't installed yet. You see the list first, and nothing starts running in the background unless you say yes."
+    return
+  fi
+  x="${IDX[$a.long]:-}"; [ -n "$x" ] || x="$(addon_desc "$a")"
+  [ -n "$x" ] || x="No description yet. It's in ~/bin and calls itself a t-launcher add-on, but it isn't in the add-on index."
+  echo "$x"
+  x="${IDX[$a.example]:-}";  [ -n "$x" ] && echo "Try: $x"
+  x="${IDX[$a.pkgs]:-}";     [ -n "$x" ] && needs+="${needs:+ · }packages: $x"
+  x="${IDX[$a.perms]:-}";    [ -n "$x" ] && needs+="${needs:+ · }permission: $x"
+  x="${IDX[$a.apps]:-}";     [ -n "$x" ] && needs+="${needs:+ · }app: $x"
+  x="${IDX[$a.hardware]:-}"; [ -n "$x" ] && needs+="${needs:+ · }hardware: $x"
+  [ -n "$needs" ] && echo "Needs $needs"
+  { [ "${IDX[$a.background]:-}" = yes ] || [ -n "$(addon_bg_reason "$a")" ]; } \
+    && echo "Can keep running in the background. You're asked before it starts."
+  x="${IDX[$a.warning]:-}";  [ -n "$x" ] && echo "Heads up: $x"
+  return 0
+}
+# The add-ons that can leave something running, and what that something does. The command that
+# starts it lives here in the launcher, never in the index.
+addon_bg_reason() {
+  case "$1" in
+    dropwatch) echo "It watches your Download folder and handles new files as they arrive." ;;
+    clipkey)   echo "It saves what you copy so you can get an old clip back." ;;
+  esac
+}
+addon_offer_start() { # installing never starts a background job; this asks, separately
+  local a="$1" why; why="$(addon_bg_reason "$a")"
+  [ -n "$why" ] || return 0
+  {
+    echo -e "\n${C_ACC}$a${C_RESET} can keep running in the background."
+    echo "$why"
+    case "$a" in
+      dropwatch) echo "Start it later any time with:  dropwatch install" ;;
+      clipkey)   echo "Start it later any time with:  clipkey setup" ;;
+    esac
+  } >&2
+  confirm "Start it now?" || return 0
+  case "$a" in
+    dropwatch) "$HOME/bin/dropwatch" install >&2 ;;
+    clipkey)   "$HOME/bin/clipkey" setup >&2 ;;
+  esac
+}
+addon_install() { # shows what it is and needs, asks, downloads. 0 = installed · 1 = failed · 2 = you said no
+  local a="$1"
+  {
+    echo -e "\n${C_ACC}$a${C_RESET}"
+    addon_about "$a" | fold -s -w "$(( $(cols) - 2 ))"
+    echo
+  } >&2
+  confirm "Install $a?" || return 2
+  get_addon "$a" >&2 || return 1
+  addon_offer_start "$a"
+  return 0
+}
+extra_addons() { # tools in ~/bin that say "t-launcher add-on" in their first 5 lines but aren't in the index
+  local t h
+  while IFS= read -r t; do
+    case " $ADDONS t-launcher pkgkey fkey topen fmget " in *" $t "*) continue ;; esac
+    [[ $t =~ ^[A-Za-z0-9._-]+$ ]] || continue
+    h="$(head -n 5 -- "$HOME/bin/$t" 2>/dev/null | tr -d '\0')"
+    case "$h" in *$'\n'"# t-launcher v"*) continue ;; esac          # a copy of the launcher itself
+    printf '%s\n' "$h" | grep -qaiF 't-launcher add-on' && printf '%s\n' "$t"
+  done < <(bin_tools)
 }
 addons_count() { local a n=0; for a in $ADDONS; do need "$a" && n=$((n+1)); done; echo "$n"; }
 addons_menu() {
-  local a choice last=""
+  local a choice last="" todo got x
   while true; do
     set_widths
     choice="$( {
@@ -1226,15 +1340,30 @@ addons_menu() {
         if need "$a"; then row "$a" "$G_TOOLS" ON "$a" "$(addon_desc "$a")"
         else row "$a" "$C_DIM" GET "$a" "$(addon_desc "$a")"; fi
       done
+      while IFS= read -r a; do [ -n "$a" ] && row "$a" "$G_TOOLS" ON "$a" "not in the index"; done < <(extra_addons)
       row all "$G_SETUP" GET "Install all add-ons" "$(addons_count) of $NADD now"
-    } | menu_pick "Add-ons" "GET = installs on pick · Esc = back" "$last")" || return
+    } | MP="bash $QSELF --describe addon-{1}" MPH=10 menu_pick "Add-ons" "GET = not installed yet · Esc = back" "$last")" || return
     last="$choice"
     if [ "$choice" = all ]; then
-      for a in $ADDONS; do need "$a" || get_addon "$a" || echo "Install of $a failed."; done
+      todo=""; for a in $ADDONS; do need "$a" || todo+=" $a"; done
+      [ -n "$todo" ] || { msg "Every add-on is already installed."; continue; }
+      echo -e "\n${C_ACC}Not installed yet:${C_RESET}"
+      for a in $todo; do
+        echo "  $a: $(addon_desc "$a")"
+        x="${IDX[$a.warning]:-}"; [ -n "$x" ] && echo "$x" | fold -s -w "$(( $(cols) - 8 ))" | sed 's/^/      ! /'
+      done
+      echo
+      confirm "Install all of these?" || continue
+      got=""
+      for a in $todo; do if get_addon "$a"; then got+=" $a"; else echo "Install of $a failed."; fi; done
+      for a in $got; do addon_offer_start "$a"; done
       msg "\nDone."; continue
     fi
     a="$choice"
-    if ! need "$a"; then get_addon "$a" || { msg "Install of $a failed."; continue; }; fi
+    if ! need "$a"; then
+      addon_install "$a"
+      case $? in 0) ;; 2) continue ;; *) msg "Install of $a failed."; continue ;; esac
+    fi
     (cd "$(current_dir)" && "$a")
     msg ""
   done
@@ -1252,7 +1381,8 @@ describe() {
     inbox)    d="Files you shared to Termux from other apps wait here until you move, open or discard them." ;;
     recent)   d="Files you opened or shared lately. Open one, share it again, or jump to its folder." ;;
     share)    d="In any app: Share → Termux → Edit, and the file opens here in an inbox. Nothing runs unless you pick it." ;;
-    addons)   d="$NADD optional tools. Not installed yet? Pick one and it installs itself." ;;
+    addons)   d="$NADD optional tools. Pick one to see what it does and needs; it installs when you say yes." ;;
+    addon-*)  d="$(addon_about "${1#addon-}")" ;;
     bin)      d="Run any of your own commands in ~/bin, from the folder you're in." ;;
     pkgkey)   d="Search every installed package, see the commands it gave you, run them or read their help." ;;
     fkey)     d="Type an extension (apk, tar.gz…) to see what that file type is and how to work with it." ;;
