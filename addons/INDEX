@@ -87,13 +87,13 @@ warning: Only scan networks you own or have permission to scan.
 
 name: talk
 short: voice commands
-long: Say what you want and it runs the matching command. Teach it your own phrases with "talk add".
+long: Say what you want and it finds the matching command, then asks before running it. Teach it your own phrases with "talk add".
 example: talk list
 level: comfortable
 pkgs: termux-api
 perms: microphone
 apps: Termux:API
-warning: Runs the matched command right away, with no confirmation. A misheard phrase can run the wrong one.
+warning: Speech gets misheard. talk shows the command and asks before running it, except for commands that only open a basic tool menu. Read the prompt before you say yes.
 
 name: cardkey
 short: Cardputer over Wi-Fi

@@ -19,7 +19,7 @@
 
 set -uo pipefail
 
-VERSION=9.2.1
+VERSION=9.2.2
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 QSELF="$(printf '%q' "$SELF")"
 CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/t-launcher"
