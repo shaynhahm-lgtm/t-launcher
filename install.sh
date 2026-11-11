@@ -9,12 +9,19 @@ TOOLS="t-launcher pkgkey fkey topen fmget"
 ADDONS="dropwatch cardkey netkey offset tdoctor clipkey talk sukey cleankey recentkey"   # these live in ~/bin
 # addons/INDEX describes the add-ons. It is data: we only ever pull plain names out of it.
 DATA="${XDG_DATA_HOME:-$HOME/.local/share}/t-launcher"
+BUILTIN="$ADDONS"   # names this installer itself vouches for
 index_names() { # adds any add-on the index lists that the built-in list above doesn't
   local n
   [ -f "$DATA/INDEX" ] || return 0
   for n in $(head -c 65536 "$DATA/INDEX" | sed -n 's/^name:[[:space:]]*\([a-z0-9][a-z0-9-]*\)[[:space:]]*$/\1/p'); do
     case " $ADDONS " in *" $n "*) ;; *) ADDONS="$ADDONS $n" ;; esac
   done
+}
+# A name that is ONLY in the index (not in the built-in list) could be wrong, stale, or the
+# same as one of your own scripts. Uninstall deletes such a file only if it is a plain file
+# (not a link) that says "t-launcher add-on" in its first 5 lines. Anything else is left alone.
+is_ours() {
+  [ -f "$1" ] && [ ! -L "$1" ] && head -c 4096 "$1" 2>/dev/null | head -n 5 | grep -qaiF 't-launcher add-on'
 }
 index_names
 if [ "${1:-}" = "--uninstall" ]; then
@@ -23,9 +30,18 @@ if [ "${1:-}" = "--uninstall" ]; then
   [ -x "$HOME/bin/dropwatch" ] && "$HOME/bin/dropwatch" uninstall >/dev/null 2>&1
   [ -x "$HOME/bin/clipkey" ] && "$HOME/bin/clipkey" uninstall >/dev/null 2>&1
   [ -x "$HOME/bin/sukey" ] && "$HOME/bin/sukey" uninstall >/dev/null 2>&1
-  for a in $ADDONS; do rm -f "$HOME/bin/$a"; done
+  GONE=""; KEPT=""
+  for a in $ADDONS; do
+    f="$HOME/bin/$a"
+    [ -e "$f" ] || [ -L "$f" ] || continue
+    case " $BUILTIN " in
+      *" $a "*) rm -f "$f"; GONE="$GONE $a" ;;
+      *) if is_ours "$f"; then rm -f "$f"; GONE="$GONE $a"; else KEPT="$KEPT $a"; fi ;;
+    esac
+  done
   rm -f "$DATA/INDEX"
-  echo "Removed: $TOOLS $ADDONS"
+  echo "Removed: $TOOLS$GONE"
+  [ -n "$KEPT" ] && echo "Left alone in ~/bin (not clearly a t-launcher add-on, so not deleted):$KEPT"
   [ -d "$HOME/.local/share/cleankey/trash" ] && echo "cleankey's trash was kept (your files): ~/.local/share/cleankey/trash and /sdcard/.cleankey-trash"
   exit 0
 fi
@@ -39,8 +55,16 @@ fi
 index_names
 WANT=""
 if [ "${1:-}" = "--addons" ]; then shift; WANT="${*:-$ADDONS}"; fi
-command -v fzf >/dev/null || pkg install -y fzf
-command -v file >/dev/null || pkg install -y libmagic >/dev/null 2>&1 || pkg install -y file >/dev/null 2>&1 || true
+# t-launcher can't run without fzf, so it gets installed. Say so first, in plain words.
+if ! command -v fzf >/dev/null; then
+  echo "t-launcher needs one package that isn't on this phone yet: fzf (the search menu it is built on)."
+  echo "Installing it now with:  pkg install fzf"
+  pkg install -y fzf || echo "fzf didn't install. t-launcher won't start until it does. Try:  pkg install fzf"
+fi
+if ! command -v file >/dev/null; then
+  echo "Also installing the small 'file' tool, which tells t-launcher what kind of file something is."
+  pkg install -y libmagic >/dev/null 2>&1 || pkg install -y file >/dev/null 2>&1 || echo "'file' didn't install. t-launcher still works, with less detail about unknown files."
+fi
 for t in $TOOLS; do
   if [ -f "$SRC/install.sh" ] && [ -f "$SRC/$t" ]; then cp "$SRC/$t" "$PREFIX/bin/$t"
   else curl -fsSL "$RAW/$t" -o "$PREFIX/bin/$t" || { echo "Download failed: $t"; exit 1; }

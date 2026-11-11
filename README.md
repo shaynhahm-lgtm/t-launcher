@@ -4,6 +4,8 @@
 Browse your files, see what anything is, and open it with the right thing, all from one fuzzy-search menu.
 Comes with **topen** (open any file with the right tool), **fmget** (install the top 10 Termux file managers), **pkgkey** (what can my installed packages do?) and **fkey** (what is this file and how do I use it?), plus ten optional [add-ons](#add-ons).
 
+**New in v9.2.1:** a safer uninstall. It removes an add-on listed only in the add-on index when the file says `t-launcher add-on` at the top, and leaves anything it is not sure about. The installer also tells you before it installs `fzf` or `file`.
+
 **New in v9.2:** every [add-on](#add-ons) now explains itself in the menu: what it does, what it needs and anything to know first. Installing asks first, and nothing starts running in the background unless you say yes.
 
 **New in v9:** [Share to t-launcher](#share-to-t-launcher) (send a file from any app straight into t-launcher), and a safety pass: Delete goes to a trash you can undo, and moves to phone storage are checked byte for byte.
