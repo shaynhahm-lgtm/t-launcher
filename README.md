@@ -21,7 +21,18 @@ Comes with **topen** (open any file with the right tool), **fmget** (install the
 **New in v9:** [Share to t-launcher](#share-to-t-launcher) (send a file from any app straight into t-launcher), and a safety pass: Delete goes to a trash you can undo, and moves to phone storage are checked byte for byte.
 **v8:** [split screen](#split-screen) (Ctrl+S) and a [regrouped menu](#the-menu).
 
-<img src="screenshots/1.jpg" width="260"> <img src="screenshots/2.jpg" width="260"> <img src="screenshots/3.jpg" width="260">
+<table>
+<tr>
+<td><img src="screenshots/menu.jpg" width="260" alt="The t-launcher menu"></td>
+<td><img src="screenshots/tdoctor.jpg" width="260" alt="tdoctor checking a Termux setup"></td>
+<td><img src="screenshots/addons.jpg" width="260" alt="Add-ons sorted into groups"></td>
+</tr>
+<tr>
+<td>The menu</td>
+<td>tdoctor checks your setup</td>
+<td><b>Coming soon:</b> grouped add-ons and storekey</td>
+</tr>
+</table>
 
 <!-- 9.4 screenshot to add: screenshots/9-tour.png (first-run walkthrough). Then swap this comment for:
 <img src="screenshots/9-tour.png" width="260">
