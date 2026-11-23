@@ -21,7 +21,7 @@
 
 set -uo pipefail
 
-VERSION=9.4-full   # Shayn's own copy: everything built so far. Public main is plain 9.4.
+VERSION=9.4.1-full   # Shayn's own copy: everything built so far. Public main is plain 9.4.
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 QSELF="$(printf '%q' "$SELF")"
 CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/t-launcher"

@@ -3,12 +3,13 @@
 #
 #   boxkey                         menu
 #   boxkey guide                   what a container is, what it's for, what goes in one
-#   boxkey new [distro] [name]     make a container (downloads a Linux system)
+#   boxkey new ubuntu              make a box (downloads a Linux system)
 #   boxkey list                    your containers, their size and package manager
-#   boxkey enter NAME              step inside (type exit to come back)
-#   boxkey run NAME COMMAND...     run one command inside, then come back
-#   boxkey ready NAME              refresh its package list, add nano + curl (asks first)
-#   boxkey remove NAME             delete a container and everything in it (type its name to confirm)
+#   boxkey enter ubuntu            step inside (type exit to come back)
+#   boxkey run ubuntu ls /         run one command inside, then come back
+#   boxkey ready ubuntu            refresh its package list, add nano + curl (asks first)
+#   boxkey remove ubuntu           delete a box and everything in it (type its name to confirm)
+#   (ubuntu = your box's name)
 #
 # This is NOT Docker and it does NOT root your phone. It drives proot-distro, Termux's own
 # container tool, which runs a second Linux system in a folder and fakes being "root" inside it.
@@ -17,7 +18,7 @@
 
 set -u
 
-VERSION=1
+VERSION=2
 P="${PREFIX:-/data/data/com.termux/files/usr}"
 PD_DIR="$P/var/lib/proot-distro"
 ROOTFS="$PD_DIR/installed-rootfs"
@@ -33,7 +34,35 @@ cols() { local r c; read -r r c < <(stty size 2>/dev/null </dev/tty); [[ ${c:-} 
 wrap() { fold -s -w "$(( $(cols) > 90 ? 88 : $(cols) - 2 ))"; }
 valid_name() { [[ $1 =~ ^[a-z0-9][a-z0-9._-]{0,31}$ ]] && [[ $1 != *..* ]]; }
 
-usage() { sed -n '3,11p' "$(readlink -f "${BASH_SOURCE[0]}")" | sed 's/^# \{0,1\}//'; }
+# Plain-words help. Shown for: boxkey help, a word boxkey doesn't know, or a missing box name.
+usage() {
+  local f='  %s%-22s%s %s\n'
+  say "A box (a container) is a whole Linux system"
+  say "in one folder inside Termux. No root, not Docker."
+  say ""
+  say "${W}Copy a line, paste it, press Enter:${N}"
+  printf "$f" "$G" "boxkey guide"         "$N" "what a box is, read first"
+  printf "$f" "$G" "boxkey new ubuntu"    "$N" "make an Ubuntu box"
+  printf "$f" "$G" "boxkey list"          "$N" "see your boxes"
+  printf "$f" "$G" "boxkey enter ubuntu"  "$N" "go inside (exit = back)"
+  printf "$f" "$G" "boxkey run ubuntu ls /" "$N" "one command inside"
+  printf "$f" "$G" "boxkey ready ubuntu"  "$N" "update it, add nano+curl"
+  printf "$f" "$G" "boxkey remove ubuntu" "$N" "delete it (asks first)"
+  say ""
+  say "${D}ubuntu = your box's name (boxkey list shows them)."
+  say "ls / = any command you want to run inside."
+  say "Type just  boxkey  for the menu.${N}"
+}
+# A command that needs a box name, run with none and nobody to pick one: say so, show the help.
+want_name() { # want_name COMMAND "$1"
+  [ -n "${2:-}" ] && return 0
+  [ -t 0 ] && return 0   # someone's there: the picker asks
+  {
+    if [ "$1" = new ]; then say "Which Linux? Add it, like:"; else say "Which box? Add its name, like:"; fi
+    say "  boxkey $1 ubuntu"; say ""; usage
+  } >&2
+  exit 1
+}
 
 # ---------- proot-distro ----------
 need_pd() {
@@ -184,6 +213,7 @@ cmd_list() {
 cmd_new() {
   local distro="${1:-}" name="${2:-}" d i
   local -a rows=()
+  want_name new "$distro"
   need_pd
   if [ -z "$distro" ]; then
     while IFS= read -r d; do [ -n "$d" ] && rows+=("$(printf '%-11s %s' "$d" "$(distro_note "$d")")"); done < <(distros)
@@ -211,6 +241,7 @@ cmd_new() {
 
 cmd_ready() { # ready NAME [yes = already asked]
   local n c
+  want_name ready "${1:-}"
   need_pd
   n="$(need_box "${1:-}")" || return 1
   case "$(pm_of "$n")" in
@@ -232,6 +263,7 @@ cmd_ready() { # ready NAME [yes = already asked]
 
 cmd_enter() {
   local n
+  want_name enter "${1:-}"
   need_pd
   n="$(need_box "${1:-}")" || return 1
   say "${C}Entering $n.${N} Type ${W}exit${N} to come back to Termux. Your phone's /sdcard is normally there too."
@@ -240,14 +272,22 @@ cmd_enter() {
 
 cmd_run() {
   local n
+  if [ $# -lt 2 ]; then
+    {
+      if [ $# -eq 0 ]; then say "Which box, and what to run in it? Like:"; say "  boxkey run ubuntu ls /"
+      else say "What should run inside $1? Like:"; say "  boxkey run $1 ls /"; fi
+      say ""; usage
+    } >&2
+    exit 1
+  fi
   need_pd
-  [ $# -ge 2 ] || die "usage: boxkey run NAME COMMAND...   e.g.  boxkey run ubuntu python3 --version"
   n="$(need_box "$1")" || exit 1; shift
   exec proot-distro login "$n" -- "$@"
 }
 
 cmd_remove() {
   local n a
+  want_name remove "${1:-}"
   need_pd
   n="$(need_box "${1:-}")" || return 1
   say "${R}This deletes the container $n and everything inside it${N}: its programs, its settings and any files you saved inside it ($(size_of "$n")). It can't be undone." | wrap
@@ -291,6 +331,12 @@ case "${1:-}" in
   ready)         shift; cmd_ready "$@" ;;
   remove|rm)     shift; cmd_remove "$@" ;;
   -v|--version)  echo "boxkey v$VERSION" ;;
-  -h|--help|help) usage ;;
-  *)             say "Unknown: $1"; usage; exit 1 ;;
+  -h|--help|help|usage) usage ;;
+  *)
+    {
+      if has_box "$1"; then say "To go into your box $1, type:"; say "  boxkey enter $1"
+      else say "boxkey doesn't know \"$1\"."; fi
+      say ""; usage
+    } >&2
+    exit 1 ;;
 esac
