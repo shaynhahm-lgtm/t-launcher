@@ -4,7 +4,7 @@
 #   bash install.sh --addons             core tools + every add-on
 #   bash install.sh --addons netkey ...  core tools + just those add-ons
 #   bash install.sh --uninstall          remove everything this installer put there
-RAW="https://raw.githubusercontent.com/shaynhahm-lgtm/t-launcher/${T_BRANCH:-main}"
+RAW="https://raw.githubusercontent.com/shaynhahm-lgtm/t-launcher/${T_BRANCH:-full}"   # "full" branch only. Never merge this line to main.
 TOOLS="t-launcher pkgkey fkey topen fmget"
 ADDONS="dropwatch cardkey netkey offset tdoctor clipkey talk sukey cleankey recentkey storekey boxkey"   # these live in ~/bin
 # addons/INDEX describes the add-ons. It is data: we only ever pull plain names out of it.

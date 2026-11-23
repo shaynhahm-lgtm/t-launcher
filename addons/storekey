@@ -19,7 +19,7 @@ DL="$SHARED/Download"
 CONF="${XDG_CONFIG_HOME:-$HOME/.config}/t-launcher/storekey"
 CK_TRASH="${XDG_DATA_HOME:-$HOME/.local/share}/cleankey/trash"
 MANIFEST="${XDG_DATA_HOME:-$HOME/.local/share}/t-launcher/manifest"
-RAW="https://raw.githubusercontent.com/shaynhahm-lgtm/t-launcher/${T_BRANCH:-main}"
+RAW="https://raw.githubusercontent.com/shaynhahm-lgtm/t-launcher/${T_BRANCH:-full}"   # "full" branch only
 G=$'\e[1;32m'; Y=$'\e[1;33m'; R=$'\e[1;31m'; C=$'\e[1;36m'; D=$'\e[38;5;244m'; W=$'\e[1m'; N=$'\e[0m'
 [ -t 1 ] || { G=; Y=; R=; C=; D=; W=; N=; }
 

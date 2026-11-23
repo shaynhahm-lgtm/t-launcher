@@ -21,12 +21,12 @@
 
 set -uo pipefail
 
-VERSION=9.4
+VERSION=9.4-full   # Shayn's own copy: everything built so far. Public main is plain 9.4.
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 QSELF="$(printf '%q' "$SELF")"
 CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/t-launcher"
 CONF="$CONF_DIR/settings"
-RAW_BASE="https://raw.githubusercontent.com/shaynhahm-lgtm/t-launcher/${T_BRANCH:-main}"
+RAW_BASE="https://raw.githubusercontent.com/shaynhahm-lgtm/t-launcher/${T_BRANCH:-full}"   # "full" branch: Update pulls the full copy. Never merge this line to main.
 
 # ---------- Self-install (backs up old version, syncs to GitHub) ----------
 if [ "${1:-}" = "--install" ]; then
