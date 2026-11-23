@@ -38,7 +38,7 @@ HIST="$DATA/history.log"
 SHARED="${CLEANKEY_SHARED:-/storage/emulated/0}"
 DL="$SHARED/Download"
 STRASH="$SHARED/.cleankey-trash"           # trash for Download, same drive = instant
-ADDONS="dropwatch cardkey netkey offset tdoctor clipkey talk sukey cleankey recentkey"
+ADDONS="dropwatch cardkey netkey offset tdoctor clipkey talk sukey cleankey recentkey storekey boxkey"
 # t-launcher's add-on index, if it's there, may list newer add-ons. Names only, read as plain text.
 TL_INDEX="${XDG_DATA_HOME:-$HOME/.local/share}/t-launcher/INDEX"
 [ -f "$TL_INDEX" ] && ADDONS="$ADDONS $(head -c 65536 "$TL_INDEX" 2>/dev/null | sed -n 's/^name:[[:space:]]*\([a-z0-9][a-z0-9-]*\)[[:space:]]*$/\1/p' | tr '\n' ' ')"

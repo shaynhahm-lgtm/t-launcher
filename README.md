@@ -2,9 +2,15 @@
 
 **A color-coded file browser and command finder for Termux.**
 Browse your files, see what anything is, and open it with the right thing, all from one fuzzy-search menu.
-Comes with **topen** (open any file with the right tool), **fmget** (install the top 10 Termux file managers), **pkgkey** (what can my installed packages do?) and **fkey** (what is this file and how do I use it?), plus ten optional [add-ons](#add-ons).
+Comes with **topen** (open any file with the right tool), **fmget** (install the top 10 Termux file managers), **pkgkey** (what can my installed packages do?) and **fkey** (what is this file and how do I use it?), plus twelve optional [add-ons](#add-ons).
 
-**New in v9.3:** t-launcher [fits how much you know](#experience-levels). The first time you run it, it asks, then shows the basics first and the rest when you want it. Nothing is ever locked. Also: uninstall keeps any file you have changed, and a [dev mode](#dev-mode) for people building t-launcher.
+- **No setup to learn.** One command installs it, and the first run asks two questions and shows you the four keys that matter.
+- **Hard to break things.** Delete goes to a trash you can undo, nothing runs or installs without asking, and uninstall keeps anything you changed.
+- **Phone-first.** Built and used on an Android phone in Termux, no laptop, no root.
+
+**New in v9.4:** a [first-run walkthrough](#first-run) that helps you pick your level, the [add-ons](#add-ons) sorted into groups (Phone care, Files, Network and gear, Job site, Power user), and two new add-ons: **storekey** (what's eating your storage) and **boxkey** (run Ubuntu, Debian or Alpine inside Termux, with a built-in plain-words guide to containers).
+
+**v9.3:** t-launcher [fits how much you know](#experience-levels). The first time you run it, it asks, then shows the basics first and the rest when you want it. Nothing is ever locked. Also: uninstall keeps any file you have changed, and a [dev mode](#dev-mode) for people building t-launcher.
 
 **v9.2.2:** `talk` now shows the command it matched and asks before running it. Only commands that just open a basic tool menu skip the question, and your own phrases never do.
 
@@ -16,6 +22,10 @@ Comes with **topen** (open any file with the right tool), **fmget** (install the
 **v8:** [split screen](#split-screen) (Ctrl+S) and a [regrouped menu](#the-menu).
 
 <img src="screenshots/1.jpg" width="260"> <img src="screenshots/2.jpg" width="260"> <img src="screenshots/3.jpg" width="260">
+
+<!-- 9.4 screenshots to add: screenshots/9-tour.png (first-run walkthrough), screenshots/10-addon-groups.png (MENU → Add-ons), screenshots/11-boxkey-guide.png (boxkey guide). Then swap this comment for:
+<img src="screenshots/9-tour.png" width="260"> <img src="screenshots/10-addon-groups.png" width="260"> <img src="screenshots/11-boxkey-guide.png" width="260">
+-->
 
 ## Install
 
@@ -100,11 +110,15 @@ Grouped and searchable (type `sort`, `go`, `split`…), with live status on the 
 | **TOOLS** | add-ons, your `~/bin` tools, pkgkey, fkey |
 | **APPS** | XFCE desktop, Fieldkit, other file managers (each shows only if you have it) |
 | **VIEW** | hidden files, sort, preview pane |
-| **SETUP** | open-with rules, share to t-launcher on/off, sync, experience level, **update t-launcher**, keys & tips |
+| **SETUP** | open-with rules, share to t-launcher on/off, sync, experience level, **update t-launcher**, keys & tips, quick tour |
+
+### First run
+
+The first time you run `t-launcher` it asks two quick questions (how much you've used a terminal, and what you mostly want it for), suggests a level, and lets you take it or pick another. Then it shows the four keys that matter: **Enter** opens, **Tab** shows what you can do with a file, **Esc** goes back, and **[MENU]** has everything else. Esc skips it. Run it again any time with `t-launcher --tour` or **MENU → Quick tour**; from there, Esc keeps the level you already have.
 
 ### Experience levels
 
-The first time you run t-launcher it asks how you use Termux. That decides what the menus show **first**, nothing more:
+Your level decides what the menus show **first**, nothing more:
 
 | Level | Menu shows |
 |---|---|
@@ -159,9 +173,19 @@ fmget -l             what's installed
 
 ## Add-ons
 
-Ten extra tools, each one a single script in [`addons/`](addons). They install to `~/bin`, run on their own or from **MENU → Add-ons**, and install anything they need (nmap, curl, fzf...) the first time you use them.
+Twelve extra tools, each one a single script in [`addons/`](addons). They install to `~/bin`, run on their own or from **MENU → Add-ons**, and install anything they need (nmap, curl, fzf...) the first time you use them.
 
-Every add-on has a block in [`addons/INDEX`](addons/INDEX): a short and long description, a suggested experience level, what it needs (packages, permissions, companion apps, hardware) and any warning. t-launcher, the installer and cleankey all take their add-on list from that one file. It is plain data and is never run. Writing your own add-on? Put `t-launcher add-on` in the first few lines of the script and it shows up in **MENU → Add-ons** even without an index entry.
+**MENU → Add-ons** sorts them into five groups. Tap a group's name to see just that group, or type to search all of them. `t-launcher --addons` prints the same list in plain text.
+
+| Group | Add-ons |
+|---|---|
+| **Phone care** | tdoctor, cleankey, storekey |
+| **Files** | recentkey, clipkey, dropwatch |
+| **Network and gear** | netkey, cardkey |
+| **Job site** | offset |
+| **Power user** | talk, sukey, boxkey |
+
+Every add-on has a block in [`addons/INDEX`](addons/INDEX): a short and long description, a suggested experience level, its group, what it needs (packages, permissions, companion apps, hardware) and any warning. t-launcher, the installer and cleankey all take their add-on list from that one file. It is plain data and is never run. Writing your own add-on? Put `t-launcher add-on` in the first few lines of the script and it shows up in **MENU → Add-ons** even without an index entry.
 
 | Add-on | What it does |
 |---|---|
@@ -174,6 +198,8 @@ Every add-on has a block in [`addons/INDEX`](addons/INDEX): a short and long des
 | **talk** | Voice commands. Say "launcher", "update" or "network" and it finds the tool. It shows the command and asks before running anything that does more than open a menu. If it doesn't understand, pick the command and it learns that phrase. Needs Termux:API. |
 | **sukey** | Near-root without unlocking the bootloader (no Knox trip). Uses [Shizuku](https://github.com/thedjchi/Shizuku) to give Termux ADB-level shell access, then: stop Android killing Termux (phantom process killer), remove or freeze bloat (reversible), grant app permissions, system-wide ad-blocking DNS, hidden settings editor, APK installs with downgrades, full logcat. Setup pulls `rish` out of the Shizuku app for you; you just pair Shizuku once over Wireless debugging. |
 | **cleankey** | What's safe to delete, and why. Looks through your home folder, `~/bin` and Download and labels everything **KEEP** (Termux or your tools need it), **CHECK** (something uses it, or it's unknown) or **SAFE** (caches, broken links, unfinished or duplicate downloads), showing what uses each item and what it checked. Anything it can't identify is CHECK, never SAFE, and "used by" follows your shell startup files through every script they load. Keys and passwords (`.ssh`, `.gnupg`, `.git-credentials`, `.netrc`…) are **locked**: cleankey won't move them at all. Deleting moves things to a trash with **undo**; nothing is gone until you empty the trash, and it never touches `~/storage`. In t-launcher, **Delete** uses this trash, and Tab on any file → *Safe to delete?* explains it. |
+| **storekey** | What's eating your storage. Shows how full the phone is, then what's using the space: Termux's packages, boxkey containers, the biggest things in your home folder and shared storage, and the biggest files in Download. Once you're past your line (85% full unless you change it with `storekey limit 80`) it offers to open cleankey. storekey itself never deletes anything. |
+| **boxkey** | Linux containers in Termux, through proot-distro: make an Ubuntu, Debian, Alpine, Arch or Fedora system, go inside it, run one command in it, remove it. No root, and not Docker. `boxkey guide` explains in plain words what a container is, what it's for, how to use one and what it needs before a program will run in it. Removing asks you to type the container's name, since everything saved inside goes with it. |
 | **recentkey** | Recent files in **MENU → GO → Recent files**. Tracks opened, viewed, edited, and shared files; updates paths after moves and renames (including folders). Shows up to 20 newest unique files in an fzf picker; Enter reveals the file’s folder. Missing, unreadable, and trashed files are skipped. History lives in `${XDG_DATA_HOME:-~/.local/share}/t-launcher/recent.tsv`, never in `.config`. |
 
 ```
@@ -187,6 +213,8 @@ talk                         listen once · talk loop · talk <words> · add · 
 sukey                        menu · setup · start · sh · debloat · restore · freeze · keepalive · adblock on · history
 cleankey                     menu · home | bin | dl · why <file> · trash <file> · undo · list · empty
 recentkey                    pick · list · clear (automatic tracking when installed)
+storekey                     what's using space · quick · limit 80
+boxkey                       menu · guide · new · list · enter NAME · run NAME CMD · ready NAME · remove NAME
 ```
 
 Optional extras dropwatch uses if you have them: `apkscan` for APKs and `appdrop` for AppImages. `termux-api` (plus the Termux:API app) turns on notifications and Wi-Fi details.
@@ -205,7 +233,7 @@ Anything a file needs that isn't installed (python, unzip, 7z, java...) gets ins
 curl -fsSL https://raw.githubusercontent.com/shaynhahm-lgtm/t-launcher/main/install.sh | bash -s -- --uninstall
 ```
 
-That removes the add-ons too. Since 9.3 the installer keeps a list of exactly what it put on your phone, and uninstall removes only those files. A file you have changed since it was installed is yours now, so it's left alone and listed, and so is anything it can't be sure about. (Anything sukey changed on the phone stays; undo it first with `sukey restore`, `sukey unfreeze`, `sukey adblock off`.)
+That removes the add-ons too. Since 9.3 the installer keeps a list of exactly what it put on your phone, and uninstall removes only those files. A file you have changed since it was installed is yours now, so it's left alone and listed, and so is anything it can't be sure about. (Anything sukey changed on the phone stays; undo it first with `sukey restore`, `sukey unfreeze`, `sukey adblock off`. Containers you made with boxkey stay too; remove one with `boxkey remove NAME` first if you want the space back.)
 
 ## License
 

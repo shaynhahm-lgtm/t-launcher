@@ -9,7 +9,9 @@
 #  - NEW folder actions (Tab on a folder), copy / move / rename / delete (to the trash, undo-able)
 #  - Enter opens any file with the right thing (topen); Tab = action menu
 #  - NEW in v9: Share to t-launcher (Share → Termux → Edit lands in an inbox), Delete → trash
-#  - Add-ons: dropwatch, cardkey, netkey, offset, tdoctor, clipkey, talk, sukey, cleankey
+#  - Add-ons: dropwatch, cardkey, netkey, offset, tdoctor, clipkey, talk, sukey, cleankey,
+#    recentkey, storekey, boxkey · grouped in MENU → Add-ons (9.4)
+#  - NEW in v9.4: a first-run walkthrough (t-launcher --tour runs it again)
 #  - 10 file managers one tap away (fmget), pkgkey + fkey built in
 #  - ".." always goes up; Esc goes back like a browser
 #
@@ -19,7 +21,7 @@
 
 set -uo pipefail
 
-VERSION=9.3
+VERSION=9.4
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 QSELF="$(printf '%q' "$SELF")"
 CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/t-launcher"
@@ -74,7 +76,7 @@ MENU_LABEL="Menu: split, add-ons, tools, settings"
 FIELDKIT_DIR="$HOME/fieldkit"
 DL="/storage/emulated/0/Download"
 [ -d "$DL" ] || DL="$HOME/storage/downloads"
-ADDONS_BUILTIN="dropwatch cardkey netkey offset tdoctor clipkey talk sukey cleankey recentkey"
+ADDONS_BUILTIN="dropwatch cardkey netkey offset tdoctor clipkey talk sukey cleankey recentkey storekey boxkey"
 ADDONS="$ADDONS_BUILTIN"
 
 # ---------- Add-on index (addons/INDEX): descriptions, needs, warnings ----------
@@ -102,7 +104,7 @@ idx_parse() { # idx_parse FILE -> "name<TAB>field<TAB>value" lines, valid blocks
       k = substr($0, 1, i - 1); v = substr($0, i + 1)
       gsub(/[[:cntrl:]]/, "", v); gsub(/\\/, "", v); gsub(/^ +| +$/, "", v)
       if (k == "name") { if (name != "") flush(); name = v; next }
-      if (k !~ /^(short|long|level|example|pkgs|perms|apps|hardware|background|warning)$/) next
+      if (k !~ /^(short|long|level|group|example|pkgs|perms|apps|hardware|background|warning)$/) next
       f[k] = substr(v, 1, (k == "short") ? 40 : 300)
     }
     END { flush() }' 2>/dev/null
@@ -1277,7 +1279,44 @@ addon_desc() { # short menu blurb: from the index, else the built-in one
     sukey)     echo "near-root (Shizuku)" ;;
     cleankey)  echo "safe cleanup + undo" ;;
     recentkey) echo "recent files" ;;
+    storekey)  echo "what's eating storage" ;;
+    boxkey)    echo "Linux containers, no root" ;;
   esac
+}
+# ---------- Add-on groups (9.4): what the Add-ons menu is sorted into ----------
+# The index's "group:" field decides; an add-on without one (or with one we don't know) falls back
+# to the built-in list below, then to "Other". Older launchers ignore the field.
+ADDON_GROUPS="care files net job power other"
+group_name() {
+  case "$1" in
+    care) echo "Phone care" ;; files) echo "Files" ;; net) echo "Network and gear" ;;
+    job) echo "Job site" ;; power) echo "Power user" ;; *) echo "Other" ;;
+  esac
+}
+addon_group() {
+  case "${IDX[$1.group]:-}" in care|files|net|job|power) echo "${IDX[$1.group]}"; return ;; esac
+  case "$1" in
+    tdoctor|cleankey|storekey)   echo care ;;
+    recentkey|clipkey|dropwatch) echo files ;;
+    netkey|cardkey)              echo net ;;
+    offset)                      echo job ;;
+    talk|sukey|boxkey)           echo power ;;
+    *)                           echo other ;;
+  esac
+}
+addons_in() { local g="$1" a; for a in $ADDONS; do [ "$(addon_group "$a")" = "$g" ] && printf '%s ' "$a"; done; }
+addons_plain() { # t-launcher --addons: the grouped list as plain text
+  local g a l
+  echo "t-launcher v$VERSION add-ons (your level: ${LEVEL:-not picked yet})"
+  for g in $ADDON_GROUPS; do
+    l="$(addons_in "$g")"; [ -n "$l" ] || continue
+    echo; echo "$(group_name "$g")"
+    for a in $l; do
+      printf '  %-10s %-11s %s\n' "$a" "$(need "$a" && echo installed || echo "not yet")" "$(addon_desc "$a")"
+    done
+  done
+  [ -n "$DEV_ADDONS" ] && { echo; echo "Being built (dev mode)"; for a in $DEV_ADDONS; do printf '  %-10s %s\n' "$a" "$(addon_desc "$a")"; done; }
+  return 0
 }
 # recentkey (add-on #10, Quinn's): t-launcher tells it what you open, share, move and rename.
 # Only if it's installed, in the background, output thrown away, never waited on: a slow,
@@ -1384,30 +1423,48 @@ extra_addons() { # tools in ~/bin that say "t-launcher add-on" in their first 5 
   done < <(bin_tools)
 }
 addons_count() { local a n=0; for a in $ADDONS; do need "$a" && n=$((n+1)); done; echo "$n"; }
-addons_menu() {
-  local a choice last="" todo got x
+addons_menu() { # addons_menu [GROUP]   all the groups, or just one (pick a group's name row)
+  local only="${1:-}" a g l choice last="" todo got x n ni title hint
+  title="Add-ons"; [ -n "$only" ] && title="Add-ons · $(group_name "$only")"
+  hint="GET = not installed$(at_level power || echo " · LATER = higher level")"
+  if [ -z "$only" ]; then hint+=$'\n'"tap a group name for just that group"; else hint+=" · Esc = back"; fi
   while true; do
     set_widths
     choice="$( {
-      # suggested for your level first, then the rest (still listed, still installable)
-      for a in $ADDONS; do
-        at_level "${IDX[$a.level]:-new}" || continue
-        if need "$a"; then row "$a" "$G_TOOLS" ON "$a" "$(addon_desc "$a")"
-        else row "$a" "$C_DIM" GET "$a" "$(addon_desc "$a")"; fi
+      for g in $ADDON_GROUPS; do
+        [ -z "$only" ] || [ "$only" = "$g" ] || continue
+        l="$(addons_in "$g")"; [ -n "$l" ] || continue
+        if [ -z "$only" ]; then
+          n=0; ni=0; for a in $l; do n=$((n + 1)); need "$a" && ni=$((ni + 1)); done
+          row "grp-$g" "$G_INFO" "──────" "$(group_name "$g")" "$ni of $n installed"
+        fi
+        # in each group: suggested for your level first, then the rest (still listed, still installable)
+        for a in $l; do
+          at_level "${IDX[$a.level]:-new}" || continue
+          if need "$a"; then row "$a" "$G_TOOLS" ON "$a" "$(addon_desc "$a")"
+          else row "$a" "$C_DIM" GET "$a" "$(addon_desc "$a")"; fi
+        done
+        for a in $l; do
+          at_level "${IDX[$a.level]:-new}" && continue
+          if need "$a"; then row "$a" "$G_TOOLS" ON "$a" "$(addon_desc "$a")"
+          else row "$a" "$C_DIM" LATER "$a" "$(addon_desc "$a")"; fi
+        done
       done
-      for a in $ADDONS; do
-        at_level "${IDX[$a.level]:-new}" && continue
-        if need "$a"; then row "$a" "$G_TOOLS" ON "$a" "$(addon_desc "$a")"
-        else row "$a" "$C_DIM" LATER "$a" "$(addon_desc "$a")"; fi
-      done
-      for a in $DEV_ADDONS; do
-        if need "$a"; then row "$a" "$G_APPS" DEV "$a" "$(addon_desc "$a")"
-        else row "$a" "$C_DIM" DEV "$a" "$(addon_desc "$a") · not installed"; fi
-      done
-      while IFS= read -r a; do [ -n "$a" ] && ! is_dev_addon "$a" && row "$a" "$G_TOOLS" ON "$a" "not in the index"; done < <(extra_addons)
-      row all "$G_SETUP" GET "Install all add-ons" "$(addons_count) of $NADD now"
-    } | MP="bash $QSELF --describe addon-{1}" MPH=10 menu_pick "Add-ons" "GET = not installed yet$(at_level power || echo " · LATER = for a higher level, yours if you want it") · Esc = back" "$last")" || return
+      if [ -z "$only" ]; then
+        [ -n "$DEV_ADDONS" ] && row grp-dev "$G_INFO" "──────" "Being built (dev)" "dev mode"
+        for a in $DEV_ADDONS; do
+          if need "$a"; then row "$a" "$G_APPS" DEV "$a" "$(addon_desc "$a")"
+          else row "$a" "$C_DIM" DEV "$a" "$(addon_desc "$a") · not installed"; fi
+        done
+        while IFS= read -r a; do [ -n "$a" ] && ! is_dev_addon "$a" && row "$a" "$G_TOOLS" ON "$a" "not in the index"; done < <(extra_addons)
+        row all "$G_SETUP" GET "Install all add-ons" "$(addons_count) of $NADD now"
+      fi
+    } | MP="bash $QSELF --describe addon-{1}" MPH=10 menu_pick "$title" "$hint" "$last")" || return
     last="$choice"
+    case "$choice" in
+      grp-dev) continue ;;
+      grp-*)   addons_menu "${choice#grp-}"; continue ;;
+    esac
     if [ "$choice" = all ]; then
       todo=""; for a in $ADDONS; do need "$a" || todo+=" $a"; done
       [ -n "$todo" ] || { msg "Every add-on is already installed."; continue; }
@@ -1432,6 +1489,23 @@ addons_menu() {
     msg ""
   done
 }
+group_about() {
+  local g="$1" l
+  case "$g" in
+    dev) echo "Add-ons still being built on the $DEV_BRANCH branch. You see these because dev mode is on."; return ;;
+  esac
+  l="$(addons_in "$g")"; l="${l% }"
+  case "$g" in
+    care)  echo "Keep Termux healthy and your storage in check." ;;
+    files) echo "Find, keep and sort your files without digging through folders." ;;
+    net)   echo "Your Wi-Fi and the gadgets you plug into it." ;;
+    job)   echo "Field math for the job site." ;;
+    power) echo "Bigger tools: voice commands, near-root powers, whole Linux systems. Read what each one does first." ;;
+    *)     echo "Add-ons that don't have a group yet." ;;
+  esac
+  echo "In it: ${l// /, }"
+  echo "Pick this row to see just this group."
+}
 
 # ---------- Main menu ----------
 describe() {
@@ -1445,7 +1519,8 @@ describe() {
     inbox)    d="Files you shared to Termux from other apps wait here until you move, open or discard them." ;;
     recent)   d="Files you opened or shared lately. Open one, share it again, or jump to its folder." ;;
     share)    d="In any app: Share → Termux → Edit, and the file opens here in an inbox. Nothing runs unless you pick it." ;;
-    addons)   d="$NADD optional tools. Pick one to see what it does and needs; it installs when you say yes." ;;
+    addons)   d="$NADD optional tools in groups: Phone care, Files, Network and gear, Job site, Power user. Pick one to see what it does and needs; it installs when you say yes." ;;
+    addon-grp-*) d="$(group_about "${1#addon-grp-}")" ;;
     addon-*)  d="$(addon_about "${1#addon-}")" ;;
     bin)      d="Run any of your own commands in ~/bin, from the folder you're in." ;;
     pkgkey)   d="Search every installed package, see the commands it gave you, run them or read their help." ;;
@@ -1460,6 +1535,10 @@ describe() {
     sync)     d="Back up your toolkit to GitHub (toolkit-sync)." ;;
     update)   d="Download the newest t-launcher and restart into it. Your settings stay." ;;
     keys)     d="Every key and gesture on one page." ;;
+    lvl-new)         d="New: the menus show the basics first (folders, add-ons, share, update). More… at the bottom shows the rest." ;;
+    lvl-comfortable) d="Comfortable: adds split screen, your own ~/bin tools, packages, other file managers, sort and preview." ;;
+    lvl-power)       d="Power: the whole menu, all the time." ;;
+    tour)     d="The welcome walkthrough again: 2 questions suggest a level, then the 4 keys to know. Esc keeps the level you have." ;;
     level)    d="How much the menus show first. New = the basics · Comfortable = adds split screen, your own tools, packages · Power = everything. Nothing is ever locked." ;;
     more)     d="Show the whole menu this once. To always see it, raise your Experience level." ;;
     dev)      d="Dev mode is on (branch: $DEV_BRANCH). You get the regular add-ons plus the ones still being built, and Update leaves files you changed alone." ;;
@@ -1543,6 +1622,7 @@ main_menu() {
       [ "$DEV" = 1 ] && row dev "$G_APPS" DEV "Dev mode" "on · $DEV_BRANCH"
       row update   "$G_SETUP" SETUP "Update t-launcher"  "v$VERSION"
       row keys     "$G_SETUP" SETUP "Keys & tips"
+      row tour     "$G_SETUP" SETUP "Quick tour"         "2 questions"
       [ "$hid" -eq 0 ] || row more "$C_DIM" MORE "More…" "$hid more at a higher level"   # (|| not &&: a false last line would fail the pipe)
     } | MP="bash $QSELF --describe {1}" menu_pick "Menu" "type to search · Esc = back" "$last")" || return
     last="$choice"
@@ -1581,6 +1661,7 @@ main_menu() {
       sync)     toolkit-sync; msg "\nSync finished." ;;
       update)   update_self ;;
       keys)     keys_help ;;
+      tour)     walkthrough ;;
       more)     full=1; last="" ;;
       level)    level_menu ;;
       dev)      dev_menu ;;
@@ -1599,6 +1680,49 @@ level_menu() { # level_menu [first]  -> sets LEVEL. Esc keeps what you had (firs
     row power       "$G_SETUP" POWER "Show me everything"    "the full menu"
   } | menu_pick "Experience level" "$hint" "${LEVEL:-new}")" || { [ -n "$LEVEL" ] || LEVEL=new; save_settings; return; }
   case "$c" in new|comfortable|power) LEVEL="$c"; save_settings ;; esac
+}
+
+# ---------- First-run walkthrough (9.4) ----------
+# Two quick questions suggest a level, you confirm it (or pick another), then four tips.
+# The first time t-launcher runs, Esc anywhere = the New level, as before. From --tour or the
+# menu, Esc keeps the level you already have.
+walk_skip() { [ "${1:-}" = first ] && [ -z "$LEVEL" ] && { LEVEL=new; save_settings; }; return 0; }
+walkthrough() { # walkthrough [first]
+  local first="${1:-}" q1 q2 sug hint c
+  set_widths
+  q1="$( {
+    row 0 "$G_GO"    "1 of 2" "Brand new to this"      "first time"
+    row 1 "$G_TOOLS" "1 of 2" "I know the basics"      "cd, ls, pkg"
+    row 2 "$G_SETUP" "1 of 2" "I live in the terminal" "scripts, ssh"
+  } | menu_pick "Welcome to t-launcher" "2 quick questions · Esc skips" 0)" || { walk_skip "$first"; return 0; }
+  q2="$( {
+    row 0 "$G_GO"    "2 of 2" "Find and open my files"  "photos, docs"
+    row 1 "$G_TOOLS" "2 of 2" "Run tools and scripts"   "add-ons"
+    row 2 "$G_SETUP" "2 of 2" "Build, hack, tweak"      "containers"
+  } | menu_pick "What's it for, mostly?" "pick the closest · Esc skips" 0)" || { walk_skip "$first"; return 0; }
+  case "$q1" in
+    0) sug=new ;;
+    1) if [ "$q2" = 2 ]; then sug=power; else sug=comfortable; fi ;;
+    *) if [ "$q2" = 0 ]; then sug=comfortable; else sug=power; fi ;;
+  esac
+  case "$sug" in new) hint="New" ;; comfortable) hint="Comfortable" ;; *) hint="Power" ;; esac
+  c="$( {
+    row new         "$G_GO"    NEW   "New"           "basics first"
+    row comfortable "$G_TOOLS" COMFY "Comfortable"   "+ split, tools"
+    row power       "$G_SETUP" POWER "Power"         "full menu"
+  } | MP="bash $QSELF --describe lvl-{1}" menu_pick "Suggested: $hint" "never locked · change it in MENU" "$sug")" || { walk_skip "$first"; return 0; }
+  case "$c" in new|comfortable|power) LEVEL="$c"; save_settings ;; esac
+  case "$LEVEL" in new) c=New ;; comfortable) c=Comfortable ;; *) c=Power ;; esac
+  msg "
+${C_ACC}You're set: $c.${C_RESET} 4 things to know:
+  ${G_GO}Enter${C_RESET}   opens a file the right way
+  ${G_GO}Tab${C_RESET}     what you can do with it
+  ${G_GO}Esc${C_RESET}     back one step
+  ${C_OPT}[MENU]${C_RESET}  2nd row: add-ons, settings
+
+First stop: MENU → Add-ons →
+Phone care → tdoctor checks your setup.
+Again any time:  t-launcher --tour"
 }
 
 # ---------- Dev mode ----------
@@ -1675,7 +1799,7 @@ main() {
   local out key sel base target hdr up rc listing count keys
   if in_tmux; then setp @tl_role files; trap cleanup EXIT; fi
   [ "${TL_OWNED:-}" = 1 ] && in_tmux && style_session
-  [ -z "$LEVEL" ] && [ "${TL_SECOND:-}" != 1 ] && level_menu first   # asked once, the first time t-launcher ever runs
+  [ -z "$LEVEL" ] && [ "${TL_SECOND:-}" != 1 ] && walkthrough first   # asked once, the first time t-launcher ever runs
   if [ -n "${PENDING_SPLIT:-}" ]; then split_open "$PENDING_SPLIT" "${PENDING_ARG:-}"; PENDING_SPLIT=""; fi
 
   while true; do
@@ -1750,6 +1874,8 @@ case "${1:-}" in
   --run-pane)    run_pane "${2:-cmd}" "${3:-}"; exit 0 ;;
   --received)    received_screen "${2:-}"; exit $? ;;
   --dev)         dev_set "${2:-status}"; exit $? ;;
+  --tour)        need fzf || { echo "fzf is not installed. Run: pkg install fzf"; exit 1; }; walkthrough; exit 0 ;;
+  --addons)      addons_plain; exit 0 ;;
   --share)       case "${2:-status}" in on) share_on ;; auto) share_on auto ;; off) share_off ;; *) share_status ;; esac; exit $? ;;
   --pane)        [ -d "${2:-}" ] && NAV_STACK=("$(readlink -f "$2")"); TL_SECOND=1; main ;;
   --split)       PENDING_SPLIT="${2:-}"; PENDING_ARG="${3:-}"

@@ -6,7 +6,7 @@
 #   bash install.sh --uninstall          remove everything this installer put there
 RAW="https://raw.githubusercontent.com/shaynhahm-lgtm/t-launcher/${T_BRANCH:-main}"
 TOOLS="t-launcher pkgkey fkey topen fmget"
-ADDONS="dropwatch cardkey netkey offset tdoctor clipkey talk sukey cleankey recentkey"   # these live in ~/bin
+ADDONS="dropwatch cardkey netkey offset tdoctor clipkey talk sukey cleankey recentkey storekey boxkey"   # these live in ~/bin
 # addons/INDEX describes the add-ons. It is data: we only ever pull plain names out of it.
 DATA="${XDG_DATA_HOME:-$HOME/.local/share}/t-launcher"
 BUILTIN="$ADDONS"   # names this installer itself vouches for
@@ -72,6 +72,8 @@ if [ "${1:-}" = "--uninstall" ]; then
   [ -n "$CHANGED" ] && echo "Left alone (changed since t-launcher installed it, so it's yours now):$CHANGED"
   [ -n "$KEPT" ] && echo "Left alone in ~/bin (not clearly a t-launcher add-on, so not deleted):$KEPT"
   [ -d "$HOME/.local/share/cleankey/trash" ] && echo "cleankey's trash was kept (your files): ~/.local/share/cleankey/trash and /sdcard/.cleankey-trash"
+  [ -n "$(ls -A "$PREFIX/var/lib/proot-distro/installed-rootfs" 2>/dev/null)" ] \
+    && echo "Containers were kept (yours, and proot-distro's): see them with  proot-distro list, remove one with  proot-distro remove NAME"
   exit 0
 fi
 SRC="$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")"

@@ -1,0 +1,296 @@
+#!/usr/bin/env bash
+# boxkey — Linux containers in Termux, no root  (t-launcher add-on)
+#
+#   boxkey                         menu
+#   boxkey guide                   what a container is, what it's for, what goes in one
+#   boxkey new [distro] [name]     make a container (downloads a Linux system)
+#   boxkey list                    your containers, their size and package manager
+#   boxkey enter NAME              step inside (type exit to come back)
+#   boxkey run NAME COMMAND...     run one command inside, then come back
+#   boxkey ready NAME              refresh its package list, add nano + curl (asks first)
+#   boxkey remove NAME             delete a container and everything in it (type its name to confirm)
+#
+# This is NOT Docker and it does NOT root your phone. It drives proot-distro, Termux's own
+# container tool, which runs a second Linux system in a folder and fakes being "root" inside it.
+# Most Linux programs work. Things that need the real kernel (Docker itself, VPNs, systemd) don't.
+# ============================================================
+
+set -u
+
+VERSION=1
+P="${PREFIX:-/data/data/com.termux/files/usr}"
+PD_DIR="$P/var/lib/proot-distro"
+ROOTFS="$PD_DIR/installed-rootfs"
+PLUGINS="$P/etc/proot-distro"
+G=$'\e[1;32m'; Y=$'\e[1;33m'; R=$'\e[1;31m'; C=$'\e[1;36m'; D=$'\e[38;5;244m'; W=$'\e[1m'; N=$'\e[0m'
+[ -t 1 ] || { G=; Y=; R=; C=; D=; W=; N=; }
+
+need() { command -v "$1" >/dev/null 2>&1; }
+say()  { printf '%s\n' "$*"; }
+die()  { printf '%sboxkey:%s %s\n' "$R" "$N" "$*" >&2; exit 1; }
+confirm() { local a; read -r -p "$1 [y/N] " a || return 1; [[ $a == [yY]* ]]; }
+cols() { local r c; read -r r c < <(stty size 2>/dev/null </dev/tty); [[ ${c:-} =~ ^[0-9]+$ ]] || c=60; printf '%s' "$c"; }
+wrap() { fold -s -w "$(( $(cols) > 90 ? 88 : $(cols) - 2 ))"; }
+valid_name() { [[ $1 =~ ^[a-z0-9][a-z0-9._-]{0,31}$ ]] && [[ $1 != *..* ]]; }
+
+usage() { sed -n '3,11p' "$(readlink -f "${BASH_SOURCE[0]}")" | sed 's/^# \{0,1\}//'; }
+
+# ---------- proot-distro ----------
+need_pd() {
+  need proot-distro && return 0
+  say "boxkey runs on proot-distro, Termux's own container tool. It isn't installed yet."
+  say "It's one package from the normal Termux mirror (no root, nothing outside Termux changes)."
+  if [ -t 0 ] && confirm "Install it now with  pkg install proot-distro ?"; then
+    pkg install -y proot-distro || die "proot-distro didn't install. Try:  pkg install proot-distro"
+  fi
+  need proot-distro || die "needs proot-distro:  pkg install proot-distro"
+}
+
+# Containers you have = folders in proot-distro's installed-rootfs
+boxes() {
+  local d
+  [ -d "$ROOTFS" ] || return 0
+  for d in "$ROOTFS"/*/; do
+    [ -d "$d" ] || continue
+    d="${d%/}"; d="${d##*/}"
+    valid_name "$d" && printf '%s\n' "$d"
+  done
+}
+has_box() { valid_name "$1" && [ -d "$ROOTFS/$1" ]; }
+
+# Linux systems you can make = proot-distro's plugin files (ubuntu.sh, debian.sh, ...)
+distros() {
+  local f n out=""
+  if [ -d "$PLUGINS" ]; then
+    for f in "$PLUGINS"/*.sh; do
+      [ -f "$f" ] || continue
+      n="${f##*/}"; n="${n%.sh}"
+      case "$n" in *.override|*override*) continue ;; esac
+      valid_name "$n" && out+="$n"$'\n'
+    done
+  fi
+  [ -n "$out" ] || out=$'alpine\narchlinux\ndebian\nfedora\nubuntu\n'
+  printf '%s' "$out"
+}
+distro_note() {
+  case "$1" in
+    ubuntu)    echo "most guides online are written for it · apt" ;;
+    debian)    echo "steady, like Ubuntu underneath · apt" ;;
+    alpine)    echo "smallest and fastest to set up · apk" ;;
+    archlinux) echo "newest versions of everything · pacman" ;;
+    fedora)    echo "Red Hat family · dnf" ;;
+    opensuse)  echo "SUSE family · zypper" ;;
+    void)      echo "small, no systemd · xbps" ;;
+    manjaro)   echo "Arch, friendlier · pacman" ;;
+    *)         echo "" ;;
+  esac
+}
+
+pm_of() { # which package manager a container uses
+  local r="$ROOTFS/$1"
+  if   [ -e "$r/usr/bin/apt-get" ];      then echo apt
+  elif [ -e "$r/sbin/apk" ];             then echo apk
+  elif [ -e "$r/usr/bin/pacman" ];       then echo pacman
+  elif [ -e "$r/usr/bin/dnf" ];          then echo dnf
+  elif [ -e "$r/usr/bin/zypper" ];       then echo zypper
+  elif [ -e "$r/usr/bin/xbps-install" ]; then echo xbps
+  else echo "?"; fi
+}
+size_of() { du -sh -- "$ROOTFS/$1" 2>/dev/null | cut -f1; }
+
+# ---------- picking ----------
+choose() { # choose "Title" line... -> prints the first word of the picked line
+  local title="$1" sel i=1 a; shift
+  [ $# -gt 0 ] || return 1
+  if need fzf && [ -t 0 ] && [ -t 1 ]; then
+    sel="$(printf '%s\n' "$@" | fzf --reverse --ansi --cycle --prompt='› ' --header="$title · Esc = back")" || return 1
+  else
+    say "$title"
+    for a in "$@"; do printf '  %d) %s\n' "$i" "$a"; i=$((i + 1)); done
+    read -r -p "Number (Enter = back): " a || return 1
+    [[ $a =~ ^[0-9]+$ ]] && [ "$a" -ge 1 ] && [ "$a" -le $# ] || return 1
+    sel="${!a}"
+  fi
+  printf '%s' "${sel%% *}"
+}
+pick_box() { # pick_box "what for" -> NAME
+  local b
+  local -a rows=()
+  while IFS= read -r b; do [ -n "$b" ] && rows+=("$(printf '%-14s %s' "$b" "$(pm_of "$b")")"); done < <(boxes)
+  [ "${#rows[@]}" -gt 0 ] || { say "No containers yet. Make one with:  boxkey new" >&2; return 1; }
+  choose "$1" "${rows[@]}"
+}
+need_box() { # need_box NAME (or pick one if empty)
+  local n="${1:-}"
+  if [ -z "$n" ]; then n="$(pick_box "Which container?")" || return 1; fi
+  valid_name "$n" || { say "\"$n\" isn't a container name (lower-case letters, digits, dot, dash)." >&2; return 1; }
+  has_box "$n" || { say "There's no container called \"$n\". See yours with:  boxkey list" >&2; return 1; }
+  printf '%s' "$n"
+}
+
+# ---------- commands ----------
+cmd_guide() {
+  {
+cat <<EOF
+${C}WHAT A CONTAINER IS${N}
+A container is a whole second Linux system that lives in one folder inside Termux. When you enter it, your prompt is inside that system: it has its own programs, its own package manager and its own files. Type exit and you're back in Termux, which nothing inside the container touched.
+
+boxkey uses proot-distro. It needs no root and it is not Docker. It fakes being the "root" user, so most Linux programs run. Things that need the real kernel (Docker itself, VPNs, systemd services) won't. It runs a bit slower than Termux itself.
+
+${C}WHAT CONTAINERS ARE FOR${N}
+ - Programs Termux doesn't have, and guides written for Ubuntu or Debian (the ones that say "sudo apt install").
+ - Trying something risky without touching your Termux setup. Broke it? Remove it and make a new one.
+ - Keeping one project's tools apart from everything else.
+ - Tools that only ship for regular Linux, like AppImages or a full desktop.
+ Not for: making Termux faster, or getting root on your phone.
+
+${C}HOW TO USE ONE${N}
+ 1. boxkey new          pick a Linux. Ubuntu if you're following a guide, Alpine if you want small.
+ 2. boxkey ready NAME   refreshes its package list and adds nano and curl.
+ 3. boxkey enter NAME   you're inside. The prompt changes (root@localhost).
+ 4. Install and run things the way that Linux does it, like apt install python3 on Ubuntu. No sudo: you're already "root" in there.
+ 5. exit                back to Termux.
+ One command without going in:  boxkey run NAME python3 --version
+
+${C}WHAT A CONTAINER NEEDS TO RUN SOMETHING${N}
+A new container is almost empty. For a program to run inside it, it needs:
+ 1. The Linux system itself. boxkey new downloads it.
+ 2. A fresh package list. boxkey ready does that (or apt update inside).
+ 3. The program and everything it depends on, installed with that Linux's own package manager: apt (Ubuntu, Debian), apk (Alpine), pacman (Arch), dnf (Fedora). Your Termux packages don't carry over, so install them again inside.
+ 4. Your files. Keep them in your phone's shared storage (/sdcard, Download included): it normally shows up inside the container at /sdcard too. Anything you save anywhere else inside stays inside, and goes away if you remove the container.
+ 5. The command that starts it, typed inside, or sent with boxkey run.
+
+${C}SPACE AND REMOVING${N}
+A container takes from tens of MB to a few GB once you install things. boxkey list shows each one's size, and storekey counts them too.
+boxkey remove NAME deletes the container and everything saved inside it. It can't be undone, so it asks you to type the name first. Files in /sdcard are not inside it and stay.
+EOF
+  } | wrap
+}
+
+cmd_list() {
+  local b n=0
+  if [ ! -d "$ROOTFS" ] || [ -z "$(boxes)" ]; then
+    say "No containers yet. Make one with:  boxkey new    (what they are:  boxkey guide)"
+    return 0
+  fi
+  say "${W}Your containers${N}"
+  while IFS= read -r b; do
+    printf '  %s%-14s%s %-7s %s%s%s\n' "$G" "$b" "$N" "$(pm_of "$b")" "$D" "$(size_of "$b")" "$N"
+    n=$((n + 1))
+  done < <(boxes)
+  say "${D}Go in:  boxkey enter NAME · one command:  boxkey run NAME COMMAND${N}"
+}
+
+cmd_new() {
+  local distro="${1:-}" name="${2:-}" d i
+  local -a rows=()
+  need_pd
+  if [ -z "$distro" ]; then
+    while IFS= read -r d; do [ -n "$d" ] && rows+=("$(printf '%-11s %s' "$d" "$(distro_note "$d")")"); done < <(distros)
+    distro="$(choose "Which Linux? (not sure: ubuntu)" "${rows[@]}")" || return 1
+  fi
+  valid_name "$distro" || die "\"$distro\" isn't a Linux boxkey knows. See them with:  proot-distro list"
+  if [ -z "$name" ]; then
+    name="$distro"; i=2
+    while has_box "$name"; do name="$distro-$i"; i=$((i + 1)); done
+    if [ -t 0 ]; then
+      read -r -p "Name for it (Enter = $name): " d || d=""
+      [ -n "$d" ] && name="$d"
+    fi
+  fi
+  valid_name "$name" || die "Names are lower-case letters, digits, dot and dash, like ubuntu or work-box."
+  has_box "$name" && die "You already have a container called $name. Pick another name, or:  boxkey enter $name"
+  say "Making $name from $distro. This downloads a small Linux system (tens of MB) and unpacks it."
+  if [ "$name" = "$distro" ]; then proot-distro install "$distro"
+  else proot-distro install --override-alias "$name" "$distro"; fi || die "proot-distro couldn't make it (no connection, or no space?). Nothing else was changed."
+  has_box "$name" || die "proot-distro finished, but there's no container called $name. Check:  proot-distro list"
+  say "${G}Done.${N} $name is ready to use, and nearly empty."
+  if [ -t 0 ] && confirm "Refresh its package list and add nano and curl now (recommended)?"; then cmd_ready "$name" yes; fi
+  say "Go in with:  boxkey enter $name    (type exit to come back)"
+}
+
+cmd_ready() { # ready NAME [yes = already asked]
+  local n c
+  need_pd
+  n="$(need_box "${1:-}")" || return 1
+  case "$(pm_of "$n")" in
+    apt)    c="apt-get update && apt-get -y upgrade && apt-get -y install nano curl ca-certificates" ;;
+    apk)    c="apk update && apk upgrade && apk add nano curl bash" ;;
+    pacman) c="pacman -Syu --noconfirm nano curl" ;;
+    dnf)    c="dnf -y upgrade && dnf -y install nano curl" ;;
+    zypper) c="zypper -n refresh && zypper -n install nano curl" ;;
+    xbps)   c="xbps-install -Syu && xbps-install -y nano curl" ;;
+    *)      say "boxkey can't tell which package manager $n uses. Go in (boxkey enter $n) and update it there."; return 1 ;;
+  esac
+  if [ "${2:-}" != yes ]; then
+    say "This runs inside $n:"; say "  $c"
+    confirm "Go ahead?" || return 0
+  fi
+  proot-distro login "$n" -- /bin/sh -c "$c" || { say "${Y}Something in that didn't finish.${N} Go in with  boxkey enter $n  and try it there."; return 1; }
+  say "${G}$n is up to date.${N}"
+}
+
+cmd_enter() {
+  local n
+  need_pd
+  n="$(need_box "${1:-}")" || return 1
+  say "${C}Entering $n.${N} Type ${W}exit${N} to come back to Termux. Your phone's /sdcard is normally there too."
+  exec proot-distro login "$n"
+}
+
+cmd_run() {
+  local n
+  need_pd
+  [ $# -ge 2 ] || die "usage: boxkey run NAME COMMAND...   e.g.  boxkey run ubuntu python3 --version"
+  n="$(need_box "$1")" || exit 1; shift
+  exec proot-distro login "$n" -- "$@"
+}
+
+cmd_remove() {
+  local n a
+  need_pd
+  n="$(need_box "${1:-}")" || return 1
+  say "${R}This deletes the container $n and everything inside it${N}: its programs, its settings and any files you saved inside it ($(size_of "$n")). It can't be undone." | wrap
+  say "Files in /sdcard are not inside it and stay."
+  read -r -p "Type $n to delete it, or just press Enter to keep it: " a || a=""
+  if [ "$a" != "$n" ]; then say "Kept $n. Nothing was deleted."; return 0; fi
+  proot-distro remove "$n" || die "proot-distro couldn't remove $n."
+  if has_box "$n"; then say "${Y}proot-distro finished, but $n is still there.${N} Check:  proot-distro list"; return 1; fi
+  say "Removed $n."
+}
+
+menu() {
+  local c nb
+  while :; do
+    nb="$(boxes | wc -l)"
+    c="$(choose "boxkey · Linux containers, no root · $nb yours" \
+      "guide    What containers are, and what goes in one" \
+      "list     Your containers ($nb)" \
+      "enter    Go inside one" \
+      "new      Make a container" \
+      "ready    Refresh one's packages, add nano + curl" \
+      "remove   Delete one (asks you to type its name)")" || return 0
+    case "$c" in
+      guide)  cmd_guide | less -R 2>/dev/null || cmd_guide ;;
+      list)   cmd_list; read -r -n1 -s -p "${D}Press any key...${N}" _; echo ;;
+      enter)  cmd_enter ;;
+      new)    cmd_new ;;
+      ready)  cmd_ready ;;
+      remove) cmd_remove ;;
+    esac
+  done
+}
+
+case "${1:-}" in
+  "")            if [ -t 0 ]; then menu; else usage; fi ;;
+  guide|help-me) cmd_guide ;;
+  list|ls)       cmd_list ;;
+  new|make)      shift; cmd_new "$@" ;;
+  enter|in)      shift; cmd_enter "$@" ;;
+  run)           shift; cmd_run "$@" ;;
+  ready)         shift; cmd_ready "$@" ;;
+  remove|rm)     shift; cmd_remove "$@" ;;
+  -v|--version)  echo "boxkey v$VERSION" ;;
+  -h|--help|help) usage ;;
+  *)             say "Unknown: $1"; usage; exit 1 ;;
+esac

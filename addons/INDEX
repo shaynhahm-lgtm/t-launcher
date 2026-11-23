@@ -18,6 +18,9 @@
 #               SUGGESTED starting level only. Never restricts access:
 #               every add-on is searchable and installable at every level.
 # Optional
+#   group       care | files | net | job | power   (9.4) the Add-ons menu section:
+#               Phone care, Files, Network and gear, Job site, Power user.
+#               Missing or unknown = the launcher's own guess, else "Other".
 #   example     one thing to try first
 #   pkgs        Termux packages it uses (shown before install)
 #   perms       Android permissions it will ask for
@@ -34,20 +37,30 @@ short: check & fix Termux
 long: Checks your Termux setup and offers to fix what it finds. Good first stop when something breaks.
 example: tdoctor --quick
 level: new
+group: care
 
 name: cleankey
 short: safe cleanup + undo
 long: Shows what's safe to delete in home, ~/bin and Download, and why. Deletes go to a trash you can undo.
 example: cleankey why ~/somefile
 level: new
+group: care
 pkgs: fzf
 perms: storage
+
+name: storekey
+short: what's eating storage
+long: Shows how full your phone is and what's using the space: Termux, containers, home, Download. Past your line (85% unless you change it) it offers cleankey. It never deletes anything itself.
+example: storekey
+level: new
+group: care
 
 name: recentkey
 short: recent files
 long: Quickly return to files you've used without searching through folders. Keeps your last 20.
 example: MENU > Recent files
 level: new
+group: files
 pkgs: fzf
 
 name: clipkey
@@ -55,6 +68,7 @@ short: clipboard history
 long: Remembers what you copy so you can get an old clip back. "clipkey clear" wipes the history.
 example: clipkey
 level: new
+group: files
 pkgs: fzf, termux-api
 apps: Termux:API
 background: yes
@@ -64,12 +78,14 @@ short: pipe offset & grade
 long: Pipe offset and grade math in feet and tenths: run, diagonal, rolling offsets, fall over a distance.
 example: offset 2.4 45
 level: new
+group: job
 
 name: dropwatch
 short: auto-handles downloads
 long: Watches Download and handles new files for you: scripts become commands (never run), APKs get scanned. Every change has Undo.
 example: dropwatch rules
 level: comfortable
+group: files
 pkgs: termux-api
 perms: storage
 apps: Termux:API (for the Undo button)
@@ -81,6 +97,7 @@ short: what's on your Wi-Fi
 long: Shows every device on your Wi-Fi and helps you work out what each one is. Speed test too.
 example: netkey
 level: comfortable
+group: net
 pkgs: nmap, curl, fzf, termux-api
 apps: Termux:API
 warning: Only scan networks you own or have permission to scan.
@@ -90,6 +107,7 @@ short: voice commands
 long: Say what you want and it finds the matching command, then asks before running it. Teach it your own phrases with "talk add".
 example: talk list
 level: comfortable
+group: power
 pkgs: termux-api
 perms: microphone
 apps: Termux:API
@@ -100,6 +118,7 @@ short: Cardputer over Wi-Fi
 long: Runs an M5Stack Cardputer from your phone: browse its SD card, send files, flash firmware, make backups.
 example: cardkey
 level: comfortable
+group: net
 pkgs: curl, fzf
 hardware: M5Stack Cardputer running Launcher
 warning: Flashing firmware replaces what is on the Cardputer.
@@ -109,5 +128,15 @@ short: near-root (Shizuku)
 long: ADB-level powers via Shizuku, no root. Some actions change how the whole phone behaves, not just Termux.
 example: sukey help
 level: power
+group: power
 apps: Shizuku (set up and running)
 warning: Can remove or freeze apps, grant permissions and change phone-wide Android settings. Read each prompt before you say yes.
+
+name: boxkey
+short: Linux containers, no root
+long: Runs Ubuntu, Debian, Alpine and more inside Termux with proot-distro. No root, not Docker. "boxkey guide" explains what containers are for and what goes in one.
+example: boxkey guide
+level: power
+group: power
+pkgs: proot-distro
+warning: "boxkey remove" deletes a container and every file saved inside it, for good (it asks you to type the name). Containers can use a few GB once you install things.

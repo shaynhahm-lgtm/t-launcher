@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# storekey — what's eating your storage  (t-launcher add-on)
+#
+#   storekey              how full the phone is, what's using the space, then offers
+#                         cleankey once you're past your line
+#   storekey quick        one line, nothing asked (for scripts)
+#   storekey limit [N]    show or set your line: percent full, default 85
+#
+# storekey only looks. It never deletes, moves or empties anything. When you're past your line
+# it offers to open cleankey, which shows what's safe to clear and asks before every move.
+# ============================================================
+
+set -u
+
+VERSION=1
+P="${PREFIX:-/data/data/com.termux/files/usr}"
+SHARED="${STOREKEY_SHARED:-/storage/emulated/0}"
+DL="$SHARED/Download"
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/t-launcher/storekey"
+CK_TRASH="${XDG_DATA_HOME:-$HOME/.local/share}/cleankey/trash"
+MANIFEST="${XDG_DATA_HOME:-$HOME/.local/share}/t-launcher/manifest"
+RAW="https://raw.githubusercontent.com/shaynhahm-lgtm/t-launcher/${T_BRANCH:-main}"
+G=$'\e[1;32m'; Y=$'\e[1;33m'; R=$'\e[1;31m'; C=$'\e[1;36m'; D=$'\e[38;5;244m'; W=$'\e[1m'; N=$'\e[0m'
+[ -t 1 ] || { G=; Y=; R=; C=; D=; W=; N=; }
+
+need() { command -v "$1" >/dev/null 2>&1; }
+say()  { printf '%s\n' "$*"; }
+confirm() { local a; read -r -p "$1 [y/N] " a || return 1; [[ $a == [yY]* ]]; }
+tilde() { local p="$1"; [[ $p == "$HOME"* ]] && p="~${p#"$HOME"}"; [[ $p == "$SHARED"* ]] && p="/sdcard${p#"$SHARED"}"; printf '%s' "$p"; }
+human() { # KB -> 1.2G
+  local k="${1:-0}"
+  if need numfmt; then numfmt --from-unit=1024 --to=iec "$k" 2>/dev/null || printf '%sK' "$k"
+  else printf '%sK' "$k"; fi
+}
+t() { if need timeout; then timeout 120 "$@"; else "$@"; fi; }
+kb() { t du -skx "$@" 2>/dev/null | awk '{ s += $1 } END { print s + 0 }'; }
+
+# ---------- your line ----------
+get_limit() {
+  local v=""
+  [ -f "$CONF" ] && v="$(sed -n 's/^LIMIT=\([0-9][0-9]*\)$/\1/p' "$CONF" | head -1)"
+  [ -n "${STOREKEY_LIMIT:-}" ] && v="$STOREKEY_LIMIT"
+  [[ $v =~ ^[0-9]+$ ]] && [ "$v" -ge 1 ] && [ "$v" -le 99 ] || v=85
+  printf '%s' "$v"
+}
+cmd_limit() {
+  local v="${1:-}"
+  if [ -z "$v" ]; then say "Your line: $(get_limit)% full. Past it, storekey offers cleankey. Change it:  storekey limit 80"; return 0; fi
+  [[ $v =~ ^[0-9]+$ ]] && [ "$v" -ge 1 ] && [ "$v" -le 99 ] || { say "Give a percent from 1 to 99, like:  storekey limit 80"; return 1; }
+  mkdir -p "${CONF%/*}" && printf 'LIMIT=%s\n' "$v" >"$CONF" && say "Got it: storekey offers cleankey once storage is ${v}% full."
+}
+
+# ---------- how full ----------
+where_df() { if [ -d "$SHARED" ] && [ -r "$SHARED" ]; then printf '%s' "$SHARED"; else printf '%s' "$HOME"; fi; }
+read_df() { # sets TOTAL USED FREE PCT (KB)
+  local l
+  l="$(df -Pk -- "$(where_df)" 2>/dev/null | awk 'NR == 2 { print $2, $3, $4 }')"
+  read -r TOTAL USED FREE <<<"$l"
+  [[ ${TOTAL:-} =~ ^[0-9]+$ && ${USED:-} =~ ^[0-9]+$ && ${FREE:-} =~ ^[0-9]+$ ]] && [ "$TOTAL" -gt 0 ] || return 1
+  PCT=$(( ((TOTAL - FREE) * 100 + TOTAL / 2) / TOTAL ))   # how full, the way Android's Settings counts it: all that isn't free
+  USED=$(( TOTAL - FREE ))
+}
+bar() { # bar PCT
+  local w=24 f; f=$(( $1 * w / 100 )); ((f > w)) && f=$w
+  local col="$G"; [ "$1" -ge "$(get_limit)" ] && col="$R"; [ "$1" -lt "$(get_limit)" ] && [ "$1" -ge $(( $(get_limit) - 10 )) ] && col="$Y"
+  printf '%s%s%s%s' "$col" "$(printf '%*s' "$f" '' | tr ' ' '#')" "$N$D$(printf '%*s' $((w - f)) '' | tr ' ' '.')" "$N"
+}
+
+cmd_quick() {
+  read_df || { say "storekey: couldn't read how full storage is (df failed)."; return 1; }
+  say "Storage $PCT% full · $(human "$FREE") free of $(human "$TOTAL") · your line $(get_limit)%"
+}
+
+# ---------- what's using it ----------
+line() { printf '  %-28s %s%8s%s\n' "$1" "$W" "$(human "$2")" "$N"; }
+report() {
+  local pd="$P/var/lib/proot-distro" k cache tr1 tr2 f s
+  read_df || { say "Couldn't read how full storage is (df failed)."; return 1; }
+  say "${W}Phone storage${N}  $(bar "$PCT")  $PCT% full"
+  say "  $(human "$USED") used · $(human "$FREE") free · $(human "$TOTAL") in all · your line: $(get_limit)%"
+  say ""
+  say "${D}Looking at what's using it (can take a minute on a full phone)...${N}"
+  say "${C}Termux${N}"
+  k="$(t du -skx --exclude="$pd" -- "$P" 2>/dev/null | cut -f1)"; line "Packages & programs" "${k:-0}"
+  if [ -d "$pd" ]; then k="$(kb "$pd")"; [ "$k" -gt 0 ] && line "Containers (boxkey)" "$k"; fi
+  cache="$(kb "$P/var/cache/apt/archives")"
+  # biggest things in your home folder (not ~/storage: that's your phone's shared folders)
+  while IFS=$'\t' read -r s f; do
+    line "~/${f##*/}" "$s"
+  done < <(find "$HOME" -mindepth 1 -maxdepth 1 ! -name storage 2>/dev/null | while IFS= read -r f; do
+      printf '%s\t%s\n' "$(kb "$f")" "$f"; done | sort -rn | head -6)
+  if [ -d "$SHARED" ] && [ -r "$SHARED" ]; then
+    say "${C}Shared storage (/sdcard)${N}"
+    while IFS=$'\t' read -r s f; do
+      [ "$s" -gt 0 ] && line "/sdcard/${f##*/}" "$s"
+    done < <(find "$SHARED" -mindepth 1 -maxdepth 1 -type d ! -name Android ! -name '.*' 2>/dev/null | while IFS= read -r f; do
+        printf '%s\t%s\n' "$(kb "$f")" "$f"; done | sort -rn | head -6)
+    if [ -d "$DL" ]; then
+      say "${C}Biggest in Download${N}"
+      find "$DL" -maxdepth 2 -type f -printf '%s\t%p\n' 2>/dev/null | sort -rn | head -5 | while IFS=$'\t' read -r s f; do
+        printf '  %-28s %s%8s%s\n' "$(tilde "$f" | sed 's#^/sdcard/Download/##' | cut -c1-28)" "$W" "$(human $(( (s + 1023) / 1024 )))" "$N"
+      done
+    fi
+  fi
+  say ""
+  [ "${cache:-0}" -gt 10240 ] && say "${D}Of the packages, $(human "$cache") is old package downloads. Clearing those yourself:  pkg clean${N}"
+  tr1="$(kb "$CK_TRASH")"; tr2="$(kb "$SHARED/.cleankey-trash")"
+  [ $((tr1 + tr2)) -gt 0 ] && say "${D}cleankey's trash holds $(human $((tr1 + tr2))). It's only gone for good after:  cleankey empty${N}"
+  say "${D}Other apps' data isn't counted here: Android keeps it out of Termux's reach.${N}"
+}
+
+# ---------- the hand-off ----------
+get_cleankey() { # download cleankey into ~/bin, same way t-launcher does it
+  local tmp="$HOME/bin/.cleankey.part" s
+  need curl || { say "Needs curl first:  pkg install curl"; return 1; }
+  [ -e "$HOME/bin/cleankey" ] && return 0
+  mkdir -p "$HOME/bin"
+  curl -fsSL "$RAW/addons/cleankey" -o "$tmp" && mv -f "$tmp" "$HOME/bin/cleankey" && chmod +x "$HOME/bin/cleankey" \
+    || { rm -f -- "$tmp"; say "Download failed (no connection?)."; return 1; }
+  s="$(sha256sum -- "$HOME/bin/cleankey" 2>/dev/null | cut -c1-64)"
+  if [ -n "$s" ] && mkdir -p "${MANIFEST%/*}" 2>/dev/null; then   # so t-launcher's uninstall knows it put it there
+    { [ -f "$MANIFEST" ] && awk -F'\t' -v p="$HOME/bin/cleankey" '$2 != p' "$MANIFEST"; printf '%s\t%s\n' "$s" "$HOME/bin/cleankey"; } >"$MANIFEST.tmp.$$" \
+      && mv -f "$MANIFEST.tmp.$$" "$MANIFEST"
+  fi
+  case ":$PATH:" in *":$HOME/bin:"*) ;; *) export PATH="$HOME/bin:$PATH" ;; esac
+  hash -r
+}
+offer() {
+  local lim; lim="$(get_limit)"
+  if [ "$PCT" -lt "$lim" ]; then
+    say "${G}You're at $PCT%, under your $lim% line.${N} Nothing to do."
+    return 0
+  fi
+  say "${Y}You're at $PCT%, past your $lim% line.${N}"
+  say "cleankey shows what's safe to clear in your home folder, ~/bin and Download, and asks before it moves anything (to a trash you can undo)."
+  [ -t 0 ] || { say "Run  cleankey  to look."; return 0; }
+  if ! need cleankey; then
+    say "cleankey isn't installed yet. It's a t-launcher add-on (one file into ~/bin)."
+    confirm "Download cleankey now?" || return 0
+    get_cleankey || return 1
+  fi
+  confirm "Open cleankey now?" || { say "Any time:  cleankey"; return 0; }
+  cleankey
+}
+
+case "${1:-}" in
+  ""|report)       report && offer ;;
+  quick|-q)        cmd_quick ;;
+  limit)           shift; cmd_limit "$@" ;;
+  -v|--version)    echo "storekey v$VERSION" ;;
+  -h|--help|help)  sed -n '3,9p' "$(readlink -f "${BASH_SOURCE[0]}")" | sed 's/^# \{0,1\}//' ;;
+  *)               say "Unknown: $1  (try: storekey, storekey quick, storekey limit 80)"; exit 1 ;;
+esac
