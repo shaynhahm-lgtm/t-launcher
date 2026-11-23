@@ -74,10 +74,10 @@ distros() {
 }
 distro_note() {
   case "$1" in
-    ubuntu)    echo "most guides online are written for it · apt" ;;
-    debian)    echo "steady, like Ubuntu underneath · apt" ;;
-    alpine)    echo "smallest and fastest to set up · apk" ;;
-    archlinux) echo "newest versions of everything · pacman" ;;
+    ubuntu)    echo "most guides use it · apt" ;;
+    debian)    echo "steady, Ubuntu-like · apt" ;;
+    alpine)    echo "smallest, quickest · apk" ;;
+    archlinux) echo "newest of all · pacman" ;;
     fedora)    echo "Red Hat family · dnf" ;;
     opensuse)  echo "SUSE family · zypper" ;;
     void)      echo "small, no systemd · xbps" ;;
@@ -102,11 +102,11 @@ size_of() { du -sh -- "$ROOTFS/$1" 2>/dev/null | cut -f1; }
 choose() { # choose "Title" line... -> prints the first word of the picked line
   local title="$1" sel i=1 a; shift
   [ $# -gt 0 ] || return 1
-  if need fzf && [ -t 0 ] && [ -t 1 ]; then
+  if need fzf && [ -t 0 ] && [ -t 2 ]; then   # stdout is the answer, so the picker draws on the terminal
     sel="$(printf '%s\n' "$@" | fzf --reverse --ansi --cycle --prompt='› ' --header="$title · Esc = back")" || return 1
   else
-    say "$title"
-    for a in "$@"; do printf '  %d) %s\n' "$i" "$a"; i=$((i + 1)); done
+    say "$title" >&2
+    for a in "$@"; do printf '  %d) %s\n' "$i" "$a" >&2; i=$((i + 1)); done
     read -r -p "Number (Enter = back): " a || return 1
     [[ $a =~ ^[0-9]+$ ]] && [ "$a" -ge 1 ] && [ "$a" -le $# ] || return 1
     sel="${!a}"
@@ -263,13 +263,13 @@ menu() {
   local c nb
   while :; do
     nb="$(boxes | wc -l)"
-    c="$(choose "boxkey · Linux containers, no root · $nb yours" \
-      "guide    What containers are, and what goes in one" \
+    c="$(choose "boxkey · containers, no root · $nb yours" \
+      "guide    What containers are (read first)" \
       "list     Your containers ($nb)" \
       "enter    Go inside one" \
       "new      Make a container" \
-      "ready    Refresh one's packages, add nano + curl" \
-      "remove   Delete one (asks you to type its name)")" || return 0
+      "ready    Update one, add nano + curl" \
+      "remove   Delete one (you type its name)")" || return 0
     case "$c" in
       guide)  cmd_guide | less -R 2>/dev/null || cmd_guide ;;
       list)   cmd_list; read -r -n1 -s -p "${D}Press any key...${N}" _; echo ;;
