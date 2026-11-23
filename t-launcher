@@ -10,6 +10,7 @@
 #  - Enter opens any file with the right thing (topen); Tab = action menu
 #  - NEW in v9: Share to t-launcher (Share → Termux → Edit lands in an inbox), Delete → trash
 #  - Add-ons: dropwatch, cardkey, netkey, offset, tdoctor, clipkey, talk, sukey, cleankey
+#  - NEW in v9.4: a first-run walkthrough (t-launcher --tour runs it again)
 #  - 10 file managers one tap away (fmget), pkgkey + fkey built in
 #  - ".." always goes up; Esc goes back like a browser
 #
@@ -19,7 +20,7 @@
 
 set -uo pipefail
 
-VERSION=9.3
+VERSION=9.4
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 QSELF="$(printf '%q' "$SELF")"
 CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/t-launcher"
@@ -1460,6 +1461,10 @@ describe() {
     sync)     d="Back up your toolkit to GitHub (toolkit-sync)." ;;
     update)   d="Download the newest t-launcher and restart into it. Your settings stay." ;;
     keys)     d="Every key and gesture on one page." ;;
+    lvl-new)         d="New: the menus show the basics first (folders, add-ons, share, update). More… at the bottom shows the rest." ;;
+    lvl-comfortable) d="Comfortable: adds split screen, your own ~/bin tools, packages, other file managers, sort and preview." ;;
+    lvl-power)       d="Power: the whole menu, all the time." ;;
+    tour)     d="The welcome walkthrough again: 2 questions suggest a level, then the 4 keys to know. Esc keeps the level you have." ;;
     level)    d="How much the menus show first. New = the basics · Comfortable = adds split screen, your own tools, packages · Power = everything. Nothing is ever locked." ;;
     more)     d="Show the whole menu this once. To always see it, raise your Experience level." ;;
     dev)      d="Dev mode is on (branch: $DEV_BRANCH). You get the regular add-ons plus the ones still being built, and Update leaves files you changed alone." ;;
@@ -1543,6 +1548,7 @@ main_menu() {
       [ "$DEV" = 1 ] && row dev "$G_APPS" DEV "Dev mode" "on · $DEV_BRANCH"
       row update   "$G_SETUP" SETUP "Update t-launcher"  "v$VERSION"
       row keys     "$G_SETUP" SETUP "Keys & tips"
+      row tour     "$G_SETUP" SETUP "Quick tour"         "2 questions"
       [ "$hid" -eq 0 ] || row more "$C_DIM" MORE "More…" "$hid more at a higher level"   # (|| not &&: a false last line would fail the pipe)
     } | MP="bash $QSELF --describe {1}" menu_pick "Menu" "type to search · Esc = back" "$last")" || return
     last="$choice"
@@ -1581,6 +1587,7 @@ main_menu() {
       sync)     toolkit-sync; msg "\nSync finished." ;;
       update)   update_self ;;
       keys)     keys_help ;;
+      tour)     walkthrough ;;
       more)     full=1; last="" ;;
       level)    level_menu ;;
       dev)      dev_menu ;;
@@ -1599,6 +1606,49 @@ level_menu() { # level_menu [first]  -> sets LEVEL. Esc keeps what you had (firs
     row power       "$G_SETUP" POWER "Show me everything"    "the full menu"
   } | menu_pick "Experience level" "$hint" "${LEVEL:-new}")" || { [ -n "$LEVEL" ] || LEVEL=new; save_settings; return; }
   case "$c" in new|comfortable|power) LEVEL="$c"; save_settings ;; esac
+}
+
+# ---------- First-run walkthrough (9.4) ----------
+# Two quick questions suggest a level, you confirm it (or pick another), then four tips.
+# The first time t-launcher runs, Esc anywhere = the New level, as before. From --tour or the
+# menu, Esc keeps the level you already have.
+walk_skip() { [ "${1:-}" = first ] && [ -z "$LEVEL" ] && { LEVEL=new; save_settings; }; return 0; }
+walkthrough() { # walkthrough [first]
+  local first="${1:-}" q1 q2 sug hint c
+  set_widths
+  q1="$( {
+    row 0 "$G_GO"    "1 of 2" "Brand new to this"      "first time"
+    row 1 "$G_TOOLS" "1 of 2" "I know the basics"      "cd, ls, pkg"
+    row 2 "$G_SETUP" "1 of 2" "I live in the terminal" "scripts, ssh"
+  } | menu_pick "Welcome to t-launcher" "2 quick questions · Esc skips" 0)" || { walk_skip "$first"; return 0; }
+  q2="$( {
+    row 0 "$G_GO"    "2 of 2" "Find and open my files"  "photos, docs"
+    row 1 "$G_TOOLS" "2 of 2" "Run tools and scripts"   "add-ons"
+    row 2 "$G_SETUP" "2 of 2" "Build, hack, tweak"      "containers"
+  } | menu_pick "What's it for, mostly?" "pick the closest · Esc skips" 0)" || { walk_skip "$first"; return 0; }
+  case "$q1" in
+    0) sug=new ;;
+    1) if [ "$q2" = 2 ]; then sug=power; else sug=comfortable; fi ;;
+    *) if [ "$q2" = 0 ]; then sug=comfortable; else sug=power; fi ;;
+  esac
+  case "$sug" in new) hint="New" ;; comfortable) hint="Comfortable" ;; *) hint="Power" ;; esac
+  c="$( {
+    row new         "$G_GO"    NEW   "New"           "basics first"
+    row comfortable "$G_TOOLS" COMFY "Comfortable"   "+ split, tools"
+    row power       "$G_SETUP" POWER "Power"         "full menu"
+  } | MP="bash $QSELF --describe lvl-{1}" menu_pick "Suggested: $hint" "never locked · change it in MENU" "$sug")" || { walk_skip "$first"; return 0; }
+  case "$c" in new|comfortable|power) LEVEL="$c"; save_settings ;; esac
+  case "$LEVEL" in new) c=New ;; comfortable) c=Comfortable ;; *) c=Power ;; esac
+  msg "
+${C_ACC}You're set: $c.${C_RESET} 4 things to know:
+  ${G_GO}Enter${C_RESET}   opens a file the right way
+  ${G_GO}Tab${C_RESET}     what you can do with it
+  ${G_GO}Esc${C_RESET}     back one step
+  ${C_OPT}[MENU]${C_RESET}  2nd row: add-ons, settings
+
+First stop: MENU → Add-ons →
+Phone care → tdoctor checks your setup.
+Again any time:  t-launcher --tour"
 }
 
 # ---------- Dev mode ----------
@@ -1675,7 +1725,7 @@ main() {
   local out key sel base target hdr up rc listing count keys
   if in_tmux; then setp @tl_role files; trap cleanup EXIT; fi
   [ "${TL_OWNED:-}" = 1 ] && in_tmux && style_session
-  [ -z "$LEVEL" ] && [ "${TL_SECOND:-}" != 1 ] && level_menu first   # asked once, the first time t-launcher ever runs
+  [ -z "$LEVEL" ] && [ "${TL_SECOND:-}" != 1 ] && walkthrough first   # asked once, the first time t-launcher ever runs
   if [ -n "${PENDING_SPLIT:-}" ]; then split_open "$PENDING_SPLIT" "${PENDING_ARG:-}"; PENDING_SPLIT=""; fi
 
   while true; do
@@ -1750,6 +1800,7 @@ case "${1:-}" in
   --run-pane)    run_pane "${2:-cmd}" "${3:-}"; exit 0 ;;
   --received)    received_screen "${2:-}"; exit $? ;;
   --dev)         dev_set "${2:-status}"; exit $? ;;
+  --tour)        need fzf || { echo "fzf is not installed. Run: pkg install fzf"; exit 1; }; walkthrough; exit 0 ;;
   --share)       case "${2:-status}" in on) share_on ;; auto) share_on auto ;; off) share_off ;; *) share_status ;; esac; exit $? ;;
   --pane)        [ -d "${2:-}" ] && NAV_STACK=("$(readlink -f "$2")"); TL_SECOND=1; main ;;
   --split)       PENDING_SPLIT="${2:-}"; PENDING_ARG="${3:-}"

@@ -4,7 +4,13 @@
 Browse your files, see what anything is, and open it with the right thing, all from one fuzzy-search menu.
 Comes with **topen** (open any file with the right tool), **fmget** (install the top 10 Termux file managers), **pkgkey** (what can my installed packages do?) and **fkey** (what is this file and how do I use it?), plus ten optional [add-ons](#add-ons).
 
-**New in v9.3:** t-launcher [fits how much you know](#experience-levels). The first time you run it, it asks, then shows the basics first and the rest when you want it. Nothing is ever locked. Also: uninstall keeps any file you have changed, and a [dev mode](#dev-mode) for people building t-launcher.
+- **No setup to learn.** One command installs it, and the first run asks two questions and shows you the four keys that matter.
+- **Hard to break things.** Delete goes to a trash you can undo, nothing runs or installs without asking, and uninstall keeps anything you changed.
+- **Phone-first.** Built and used on an Android phone in Termux, no laptop, no root.
+
+**New in v9.4:** a [first-run walkthrough](#first-run). Two quick questions suggest your experience level, then it shows the four keys that matter. Run it again any time with `t-launcher --tour`.
+
+**v9.3:** t-launcher [fits how much you know](#experience-levels). The first time you run it, it asks, then shows the basics first and the rest when you want it. Nothing is ever locked. Also: uninstall keeps any file you have changed, and a [dev mode](#dev-mode) for people building t-launcher.
 
 **v9.2.2:** `talk` now shows the command it matched and asks before running it. Only commands that just open a basic tool menu skip the question, and your own phrases never do.
 
@@ -16,6 +22,10 @@ Comes with **topen** (open any file with the right tool), **fmget** (install the
 **v8:** [split screen](#split-screen) (Ctrl+S) and a [regrouped menu](#the-menu).
 
 <img src="screenshots/1.jpg" width="260"> <img src="screenshots/2.jpg" width="260"> <img src="screenshots/3.jpg" width="260">
+
+<!-- 9.4 screenshot to add: screenshots/9-tour.png (first-run walkthrough). Then swap this comment for:
+<img src="screenshots/9-tour.png" width="260">
+-->
 
 ## Install
 
@@ -100,11 +110,15 @@ Grouped and searchable (type `sort`, `go`, `split`…), with live status on the 
 | **TOOLS** | add-ons, your `~/bin` tools, pkgkey, fkey |
 | **APPS** | XFCE desktop, Fieldkit, other file managers (each shows only if you have it) |
 | **VIEW** | hidden files, sort, preview pane |
-| **SETUP** | open-with rules, share to t-launcher on/off, sync, experience level, **update t-launcher**, keys & tips |
+| **SETUP** | open-with rules, share to t-launcher on/off, sync, experience level, **update t-launcher**, keys & tips, quick tour |
+
+### First run
+
+The first time you run `t-launcher` it asks two quick questions (how much you've used a terminal, and what you mostly want it for), suggests a level, and lets you take it or pick another. Then it shows the four keys that matter: **Enter** opens, **Tab** shows what you can do with a file, **Esc** goes back, and **[MENU]** has everything else. Esc skips it. Run it again any time with `t-launcher --tour` or **MENU → Quick tour**; from there, Esc keeps the level you already have.
 
 ### Experience levels
 
-The first time you run t-launcher it asks how you use Termux. That decides what the menus show **first**, nothing more:
+Your level decides what the menus show **first**, nothing more:
 
 | Level | Menu shows |
 |---|---|
