@@ -14,14 +14,19 @@
 # This is NOT Docker and it does NOT root your phone. It drives proot-distro, Termux's own
 # container tool, which runs a second Linux system in a folder and fakes being "root" inside it.
 # Most Linux programs work. Things that need the real kernel (Docker itself, VPNs, systemd) don't.
+#
+# Works with both kinds of proot-distro:
+#   5.x (Termux ships this now): boxes are pulled from Docker Hub images, kept in containers/NAME/rootfs
+#   4.x and older: boxes come from plugin files, kept in installed-rootfs/NAME
 # ============================================================
 
 set -u
 
-VERSION=2
+VERSION=3
 P="${PREFIX:-/data/data/com.termux/files/usr}"
 PD_DIR="$P/var/lib/proot-distro"
-ROOTFS="$PD_DIR/installed-rootfs"
+CONTAINERS="$PD_DIR/containers"        # proot-distro 5.x: containers/NAME/rootfs
+ROOTFS="$PD_DIR/installed-rootfs"      # proot-distro 4.x: installed-rootfs/NAME
 PLUGINS="$P/etc/proot-distro"
 G=$'\e[1;32m'; Y=$'\e[1;33m'; R=$'\e[1;31m'; C=$'\e[1;36m'; D=$'\e[38;5;244m'; W=$'\e[1m'; N=$'\e[0m'
 [ -t 1 ] || { G=; Y=; R=; C=; D=; W=; N=; }
@@ -33,6 +38,8 @@ confirm() { local a; read -r -p "$1 [y/N] " a || return 1; [[ $a == [yY]* ]]; }
 cols() { local r c; read -r r c < <(stty size 2>/dev/null </dev/tty); [[ ${c:-} =~ ^[0-9]+$ ]] || c=60; printf '%s' "$c"; }
 wrap() { fold -s -w "$(( $(cols) > 90 ? 88 : $(cols) - 2 ))"; }
 valid_name() { [[ $1 =~ ^[a-z0-9][a-z0-9._-]{0,31}$ ]] && [[ $1 != *..* ]]; }
+# A Docker Hub image, like ubuntu:24.04 or opensuse/tumbleweed (proot-distro 5.x only)
+valid_image() { [[ $1 =~ ^[a-z0-9][a-z0-9._/:-]{0,127}$ ]] && [[ $1 != *..* ]] && [[ $1 != *//* ]]; }
 
 # Plain-words help. Shown for: boxkey help, a word boxkey doesn't know, or a missing box name.
 usage() {
@@ -66,7 +73,7 @@ want_name() { # want_name COMMAND "$1"
 
 # ---------- proot-distro ----------
 need_pd() {
-  need proot-distro && return 0
+  need proot-distro && { pd5 || :; return 0; }
   say "boxkey runs on proot-distro, Termux's own container tool. It isn't installed yet."
   say "It's one package from the normal Termux mirror (no root, nothing outside Termux changes)."
   if [ -t 0 ] && confirm "Install it now with  pkg install proot-distro ?"; then
@@ -75,21 +82,62 @@ need_pd() {
   need proot-distro || die "needs proot-distro:  pkg install proot-distro"
 }
 
-# Containers you have = folders in proot-distro's installed-rootfs
+# Which proot-distro is this? 5.x pulls Docker Hub images; 4.x uses plugin files.
+pd_major() {
+  local v
+  v="$(proot-distro help 2>&1 | grep -o "version '[0-9]*" | head -n1 | grep -o '[0-9]*$')"
+  printf '%s' "${v:-0}"
+}
+pd5() {
+  [ -n "${PD5:-}" ] || {
+    if [ -d "$CONTAINERS" ] || [ "$(pd_major)" -ge 5 ]; then PD5=1; else PD5=0; fi
+  }
+  [ "$PD5" = 1 ]
+}
+
+# Where a box's files live (5.x first; 4.x boxes move there the first time you go in)
+rootfs_of() {
+  valid_name "$1" || return 1
+  if   [ -d "$CONTAINERS/$1/rootfs" ]; then printf '%s' "$CONTAINERS/$1/rootfs"
+  elif [ -d "$ROOTFS/$1" ];            then printf '%s' "$ROOTFS/$1"
+  else return 1; fi
+}
+# Containers you have = folders in containers/ (5.x) and installed-rootfs/ (4.x)
 boxes() {
   local d
-  [ -d "$ROOTFS" ] || return 0
-  for d in "$ROOTFS"/*/; do
-    [ -d "$d" ] || continue
-    d="${d%/}"; d="${d##*/}"
-    valid_name "$d" && printf '%s\n' "$d"
-  done
+  {
+    for d in "$CONTAINERS"/*/rootfs/ "$ROOTFS"/*/; do
+      [ -d "$d" ] || continue
+      d="${d%/}"; d="${d%/rootfs}"; d="${d##*/}"
+      valid_name "$d" && printf '%s\n' "$d"
+    done
+  } | sort -u
 }
-has_box() { valid_name "$1" && [ -d "$ROOTFS/$1" ]; }
+has_box() { rootfs_of "$1" >/dev/null; }
 
-# Linux systems you can make = proot-distro's plugin files (ubuntu.sh, debian.sh, ...)
+# The Docker Hub image behind each name (5.x). ubuntu stays on 24.04 LTS: newer Ubuntu
+# ships its tools as one big program with many hard links, and proot-distro has to copy
+# each link, so a new box would take about 1.4 GB instead of about 100 MB.
+image_for() {
+  case "$1" in
+    ubuntu)   echo "ubuntu:24.04" ;;
+    debian)   echo "debian:stable" ;;
+    alpine)   echo "alpine:latest" ;;
+    fedora)   echo "fedora:latest" ;;
+    opensuse) echo "opensuse/tumbleweed:latest" ;;
+    *)        echo "$1" ;;   # anything else is taken as a Docker Hub image
+  esac
+}
+# A box name from an image: opensuse/tumbleweed:latest -> tumbleweed
+name_from_image() { local n="${1##*/}"; n="${n%%@*}"; n="${n%%:*}"; printf '%s' "$n"; }
+
+# Linux systems you can make: a short list on 5.x, proot-distro's plugin files on 4.x
 distros() {
   local f n out=""
+  if pd5; then
+    printf '%s\n' ubuntu debian alpine fedora opensuse
+    return 0
+  fi
   if [ -d "$PLUGINS" ]; then
     for f in "$PLUGINS"/*.sh; do
       [ -f "$f" ] || continue
@@ -116,7 +164,7 @@ distro_note() {
 }
 
 pm_of() { # which package manager a container uses
-  local r="$ROOTFS/$1"
+  local r; r="$(rootfs_of "$1")" || { echo "?"; return 0; }
   if   [ -e "$r/usr/bin/apt-get" ];      then echo apt
   elif [ -e "$r/sbin/apk" ];             then echo apk
   elif [ -e "$r/usr/bin/pacman" ];       then echo pacman
@@ -125,7 +173,7 @@ pm_of() { # which package manager a container uses
   elif [ -e "$r/usr/bin/xbps-install" ]; then echo xbps
   else echo "?"; fi
 }
-size_of() { du -sh -- "$ROOTFS/$1" 2>/dev/null | cut -f1; }
+size_of() { local r; r="$(rootfs_of "$1")" || return 0; du -sh -- "$r" 2>/dev/null | cut -f1; }
 
 # ---------- picking ----------
 choose() { # choose "Title" line... -> prints the first word of the picked line
@@ -190,7 +238,7 @@ A new container is almost empty. For a program to run inside it, it needs:
  5. The command that starts it, typed inside, or sent with boxkey run.
 
 ${C}SPACE AND REMOVING${N}
-A container takes from tens of MB to a few GB once you install things. boxkey list shows each one's size, and storekey counts them too.
+A new container takes about 10 MB (Alpine) to about 100 MB (Ubuntu), and grows to a few GB once you install things. boxkey list shows each one's size, and storekey counts them too.
 boxkey remove NAME deletes the container and everything saved inside it. It can't be undone, so it asks you to type the name first. Files in /sdcard are not inside it and stay.
 EOF
   } | wrap
@@ -198,7 +246,7 @@ EOF
 
 cmd_list() {
   local b n=0
-  if [ ! -d "$ROOTFS" ] || [ -z "$(boxes)" ]; then
+  if [ -z "$(boxes)" ]; then
     say "No containers yet. Make one with:  boxkey new    (what they are:  boxkey guide)"
     return 0
   fi
@@ -211,7 +259,7 @@ cmd_list() {
 }
 
 cmd_new() {
-  local distro="${1:-}" name="${2:-}" d i
+  local distro="${1:-}" name="${2:-}" d i image base
   local -a rows=()
   want_name new "$distro"
   need_pd
@@ -219,10 +267,16 @@ cmd_new() {
     while IFS= read -r d; do [ -n "$d" ] && rows+=("$(printf '%-11s %s' "$d" "$(distro_note "$d")")"); done < <(distros)
     distro="$(choose "Which Linux? (not sure: ubuntu)" "${rows[@]}")" || return 1
   fi
-  valid_name "$distro" || die "\"$distro\" isn't a Linux boxkey knows. See them with:  proot-distro list"
+  if pd5; then
+    valid_image "$distro" || die "\"$distro\" isn't a Linux boxkey knows. Try ubuntu, debian, alpine or fedora."
+    image="$(image_for "$distro")"; base="$(name_from_image "$distro")"
+  else
+    valid_name "$distro" || die "\"$distro\" isn't a Linux boxkey knows. See them with:  proot-distro list"
+    image="$distro"; base="$distro"
+  fi
   if [ -z "$name" ]; then
-    name="$distro"; i=2
-    while has_box "$name"; do name="$distro-$i"; i=$((i + 1)); done
+    name="$base"; i=2
+    while has_box "$name"; do name="$base-$i"; i=$((i + 1)); done
     if [ -t 0 ]; then
       read -r -p "Name for it (Enter = $name): " d || d=""
       [ -n "$d" ] && name="$d"
@@ -230,11 +284,16 @@ cmd_new() {
   fi
   valid_name "$name" || die "Names are lower-case letters, digits, dot and dash, like ubuntu or work-box."
   has_box "$name" && die "You already have a container called $name. Pick another name, or:  boxkey enter $name"
-  say "Making $name from $distro. This downloads a small Linux system (tens of MB) and unpacks it."
-  if [ "$name" = "$distro" ]; then proot-distro install "$distro"
-  else proot-distro install --override-alias "$name" "$distro"; fi || die "proot-distro couldn't make it (no connection, or no space?). Nothing else was changed."
+  if pd5; then
+    say "Making $name from $image. This downloads a small Linux system (about 30 MB for Ubuntu) and unpacks it. Wi-Fi is best."
+    proot-distro install --name "$name" "$image" || die "proot-distro couldn't make it. Nothing else was changed. Usual reasons: no connection, no space, or Docker Hub is busy (it limits downloads per network; wait an hour or switch Wi-Fi/data and try again)."
+  else
+    say "Making $name from $distro. This downloads a small Linux system (tens of MB) and unpacks it."
+    if [ "$name" = "$distro" ]; then proot-distro install "$distro"
+    else proot-distro install --override-alias "$name" "$distro"; fi || die "proot-distro couldn't make it (no connection, or no space?). Nothing else was changed."
+  fi
   has_box "$name" || die "proot-distro finished, but there's no container called $name. Check:  proot-distro list"
-  say "${G}Done.${N} $name is ready to use, and nearly empty."
+  say "${G}Done.${N} $name is ready to use, and nearly empty ($(size_of "$name"))."
   if [ -t 0 ] && confirm "Refresh its package list and add nano and curl now (recommended)?"; then cmd_ready "$name" yes; fi
   say "Go in with:  boxkey enter $name    (type exit to come back)"
 }
