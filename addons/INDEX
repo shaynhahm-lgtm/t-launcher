@@ -43,6 +43,12 @@ level: new
 pkgs: fzf
 perms: storage
 
+name: storekey
+short: what's eating storage
+long: Shows how full your phone is and what's using the space: Termux, containers, home, Download. Past your line (85% unless you change it) it offers cleankey. It never deletes anything itself.
+example: storekey
+level: new
+
 name: recentkey
 short: recent files
 long: Quickly return to files you've used without searching through folders. Keeps your last 20.

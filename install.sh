@@ -6,7 +6,7 @@
 #   bash install.sh --uninstall          remove everything this installer put there
 RAW="https://raw.githubusercontent.com/shaynhahm-lgtm/t-launcher/${T_BRANCH:-main}"
 TOOLS="t-launcher pkgkey fkey topen fmget"
-ADDONS="dropwatch cardkey netkey offset tdoctor clipkey talk sukey cleankey recentkey"   # these live in ~/bin
+ADDONS="dropwatch cardkey netkey offset tdoctor clipkey talk sukey cleankey recentkey storekey"   # these live in ~/bin
 # addons/INDEX describes the add-ons. It is data: we only ever pull plain names out of it.
 DATA="${XDG_DATA_HOME:-$HOME/.local/share}/t-launcher"
 BUILTIN="$ADDONS"   # names this installer itself vouches for

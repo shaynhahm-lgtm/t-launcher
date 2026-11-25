@@ -9,7 +9,8 @@
 #  - NEW folder actions (Tab on a folder), copy / move / rename / delete (to the trash, undo-able)
 #  - Enter opens any file with the right thing (topen); Tab = action menu
 #  - NEW in v9: Share to t-launcher (Share → Termux → Edit lands in an inbox), Delete → trash
-#  - Add-ons: dropwatch, cardkey, netkey, offset, tdoctor, clipkey, talk, sukey, cleankey
+#  - Add-ons: dropwatch, cardkey, netkey, offset, tdoctor, clipkey, talk, sukey, cleankey,
+#    recentkey, storekey (9.5)
 #  - NEW in v9.4: a first-run walkthrough (t-launcher --tour runs it again)
 #  - 10 file managers one tap away (fmget), pkgkey + fkey built in
 #  - ".." always goes up; Esc goes back like a browser
@@ -20,7 +21,7 @@
 
 set -uo pipefail
 
-VERSION=9.4
+VERSION=9.5
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 QSELF="$(printf '%q' "$SELF")"
 CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/t-launcher"
@@ -75,7 +76,7 @@ MENU_LABEL="Menu: split, add-ons, tools, settings"
 FIELDKIT_DIR="$HOME/fieldkit"
 DL="/storage/emulated/0/Download"
 [ -d "$DL" ] || DL="$HOME/storage/downloads"
-ADDONS_BUILTIN="dropwatch cardkey netkey offset tdoctor clipkey talk sukey cleankey recentkey"
+ADDONS_BUILTIN="dropwatch cardkey netkey offset tdoctor clipkey talk sukey cleankey recentkey storekey"
 ADDONS="$ADDONS_BUILTIN"
 
 # ---------- Add-on index (addons/INDEX): descriptions, needs, warnings ----------
@@ -1278,6 +1279,7 @@ addon_desc() { # short menu blurb: from the index, else the built-in one
     sukey)     echo "near-root (Shizuku)" ;;
     cleankey)  echo "safe cleanup + undo" ;;
     recentkey) echo "recent files" ;;
+    storekey)  echo "what's eating storage" ;;
   esac
 }
 # recentkey (add-on #10, Quinn's): t-launcher tells it what you open, share, move and rename.

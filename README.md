@@ -2,13 +2,15 @@
 
 **A color-coded file browser and command finder for Termux.**
 Browse your files, see what anything is, and open it with the right thing, all from one fuzzy-search menu.
-Comes with **topen** (open any file with the right tool), **fmget** (install the top 10 Termux file managers), **pkgkey** (what can my installed packages do?) and **fkey** (what is this file and how do I use it?), plus ten optional [add-ons](#add-ons).
+Comes with **topen** (open any file with the right tool), **fmget** (install the top 10 Termux file managers), **pkgkey** (what can my installed packages do?) and **fkey** (what is this file and how do I use it?), plus eleven optional [add-ons](#add-ons).
 
 - **No setup to learn.** One command installs it, and the first run asks two questions and shows you the four keys that matter.
 - **Hard to break things.** Delete goes to a trash you can undo, nothing runs or installs without asking, and uninstall keeps anything you changed.
 - **Phone-first.** Built and used on an Android phone in Termux, no laptop, no root.
 
-**New in v9.4:** a [first-run walkthrough](#first-run). Two quick questions suggest your experience level, then it shows the four keys that matter. Run it again any time with `t-launcher --tour`.
+**New in v9.5:** **storekey**, a new [add-on](#add-ons) that shows how full your phone is and what's using the space. Past your line (85% unless you change it) it offers cleankey. storekey itself never deletes anything.
+
+**v9.4:** a [first-run walkthrough](#first-run). Two quick questions suggest your experience level, then it shows the four keys that matter. Run it again any time with `t-launcher --tour`.
 
 **v9.3:** t-launcher [fits how much you know](#experience-levels). The first time you run it, it asks, then shows the basics first and the rest when you want it. Nothing is ever locked. Also: uninstall keeps any file you have changed, and a [dev mode](#dev-mode) for people building t-launcher.
 
@@ -30,7 +32,7 @@ Comes with **topen** (open any file with the right tool), **fmget** (install the
 <tr>
 <td>The menu</td>
 <td>tdoctor checks your setup</td>
-<td><b>Coming soon:</b> grouped add-ons and storekey</td>
+<td><b>Coming soon:</b> add-ons in groups</td>
 </tr>
 </table>
 
@@ -184,7 +186,7 @@ fmget -l             what's installed
 
 ## Add-ons
 
-Ten extra tools, each one a single script in [`addons/`](addons). They install to `~/bin`, run on their own or from **MENU → Add-ons**, and install anything they need (nmap, curl, fzf...) the first time you use them.
+Eleven extra tools, each one a single script in [`addons/`](addons). They install to `~/bin`, run on their own or from **MENU → Add-ons**, and install anything they need (nmap, curl, fzf...) the first time you use them.
 
 Every add-on has a block in [`addons/INDEX`](addons/INDEX): a short and long description, a suggested experience level, what it needs (packages, permissions, companion apps, hardware) and any warning. t-launcher, the installer and cleankey all take their add-on list from that one file. It is plain data and is never run. Writing your own add-on? Put `t-launcher add-on` in the first few lines of the script and it shows up in **MENU → Add-ons** even without an index entry.
 
@@ -199,6 +201,7 @@ Every add-on has a block in [`addons/INDEX`](addons/INDEX): a short and long des
 | **talk** | Voice commands. Say "launcher", "update" or "network" and it finds the tool. It shows the command and asks before running anything that does more than open a menu. If it doesn't understand, pick the command and it learns that phrase. Needs Termux:API. |
 | **sukey** | Near-root without unlocking the bootloader (no Knox trip). Uses [Shizuku](https://github.com/thedjchi/Shizuku) to give Termux ADB-level shell access, then: stop Android killing Termux (phantom process killer), remove or freeze bloat (reversible), grant app permissions, system-wide ad-blocking DNS, hidden settings editor, APK installs with downgrades, full logcat. Setup pulls `rish` out of the Shizuku app for you; you just pair Shizuku once over Wireless debugging. |
 | **cleankey** | What's safe to delete, and why. Looks through your home folder, `~/bin` and Download and labels everything **KEEP** (Termux or your tools need it), **CHECK** (something uses it, or it's unknown) or **SAFE** (caches, broken links, unfinished or duplicate downloads), showing what uses each item and what it checked. Anything it can't identify is CHECK, never SAFE, and "used by" follows your shell startup files through every script they load. Keys and passwords (`.ssh`, `.gnupg`, `.git-credentials`, `.netrc`…) are **locked**: cleankey won't move them at all. Deleting moves things to a trash with **undo**; nothing is gone until you empty the trash, and it never touches `~/storage`. In t-launcher, **Delete** uses this trash, and Tab on any file → *Safe to delete?* explains it. |
+| **storekey** | What's eating your storage. Shows how full the phone is, then what's using the space: Termux's packages, any proot-distro containers, the biggest things in your home folder and shared storage, and the biggest files in Download. Once you're past your line (85% full unless you change it with `storekey limit 80`) it offers to open cleankey. storekey itself never deletes anything. |
 | **recentkey** | Recent files in **MENU → GO → Recent files**. Tracks opened, viewed, edited, and shared files; updates paths after moves and renames (including folders). Shows up to 20 newest unique files in an fzf picker; Enter reveals the file’s folder. Missing, unreadable, and trashed files are skipped. History lives in `${XDG_DATA_HOME:-~/.local/share}/t-launcher/recent.tsv`, never in `.config`. |
 
 ```
@@ -212,6 +215,7 @@ talk                         listen once · talk loop · talk <words> · add · 
 sukey                        menu · setup · start · sh · debloat · restore · freeze · keepalive · adblock on · history
 cleankey                     menu · home | bin | dl · why <file> · trash <file> · undo · list · empty
 recentkey                    pick · list · clear (automatic tracking when installed)
+storekey                     what's using space · quick · limit 80
 ```
 
 Optional extras dropwatch uses if you have them: `apkscan` for APKs and `appdrop` for AppImages. `termux-api` (plus the Termux:API app) turns on notifications and Wi-Fi details.
